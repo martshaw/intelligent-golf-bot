@@ -1,60 +1,73 @@
-import { parseDate } from 'chrono-node';
+import { parse } from 'chrono-node';
 
-import rp from 'request-promise';
-
-import { Course, getCourseAvailability, login } from 'requests/golfBooking';
+import { Course, getCourseAvailability } from 'requests/golfBooking';
 import { getLogin } from 'storage/logins';
+import { getOrCreateSession } from 'shared/sessionCache';
 import { Bot } from 'grammy';
 
 export function availableTimesCommand(bot: Bot): void {
   bot.on('message').command('availabletimes', async (ctx) => {
     const msg = ctx.msg;
     const command = msg.text;
-    const match = /\/availabletimes (manor|castle) (.*)/i.exec(command);
+    const match = /\/availabletimes\s+(.*)/i.exec(command);
 
-    const request = rp.defaults({ jar: rp.jar(), followAllRedirects: true });
-
-    if (match?.length !== 3) {
-      await ctx.reply('Usage is /availableTimes (Manor/Castle) (date)');
+    if (!match?.[1]) {
+      await ctx.reply('Usage: /availabletimes (date)\nExample: /availabletimes today, /availabletimes tomorrow');
       return;
     }
 
-    let courseString = match[1];
-    courseString = courseString[0].toUpperCase() + courseString.substring(1);
-    const course = Course[courseString as keyof typeof Course];
-    const dateString = match[2];
-    const date = parseDate(dateString);
-    if (!date) {
-      await ctx.reply('Could not understand date input!');
+    const dateString = match[1];
+    const results = parse(dateString);
+    if (!results || results.length === 0) {
+      await ctx.reply('❌ Could not understand date input!');
       return;
     }
+
+    const date = results[0].start.date();
 
     const credentials = await getLogin(msg.from.id);
 
     if (!credentials) {
-      await ctx.reply('You are not authenticated');
+      await ctx.reply('❌ Not authenticated. Use /login first.');
       return;
     }
 
-    await login(request, {
-      username: credentials.username,
-      password: credentials.password
-    });
-    const availableTimes = await getCourseAvailability(request, {
-      course,
-      date
-    });
+    try {
+      const startTime = Date.now();
+      const request = await getOrCreateSession(msg.from.id, credentials.username, credentials.password);
+      const availableTimes = await getCourseAvailability(request, {
+        course: Course.Kilspindie,
+        date
+      });
+      const duration = Date.now() - startTime;
 
-    let message = '<b>Available Times</b>\n';
-    message += `<b>Course:</b> ${courseString}\n`;
-    message += `<b>Date:</b> ${date.getDate()}/${
-      date.getMonth() + 1
-    }/${date.getFullYear()}`;
+      if (availableTimes.length === 0) {
+        await ctx.reply(
+          `📅 <b>Available Times - Kilspindie</b>\n` +
+          `<b>Date:</b> ${date.toDateString()}\n\n` +
+          `❌ No available tee times\n\n` +
+          `<i>Fetched in ${duration}ms</i>`,
+          { parse_mode: 'HTML' }
+        );
+        return;
+      }
 
-    availableTimes.forEach((timeSlot) => {
-      message += `\n<b>Time:</b> ${timeSlot.time}`;
-    });
+      let message = `📅 <b>Available Times - Kilspindie</b>\n`;
+      message += `<b>Date:</b> ${date.toDateString()}\n`;
+      message += `<b>Times Available:</b> ${availableTimes.length}\n\n`;
 
-    await ctx.reply(message, { parse_mode: 'HTML' });
+      availableTimes.forEach((timeSlot) => {
+        const bookable = timeSlot.canBook ? '✅' : '❌';
+        message += `${bookable} <b>${timeSlot.time}</b>\n`;
+      });
+
+      message += `\n<i>Fetched in ${duration}ms</i>`;
+
+      await ctx.reply(message, { parse_mode: 'HTML' });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      console.error('availableTimes error:', error);
+      await ctx.reply(`❌ Error: ${msg}`);
+    }
   });
 }

@@ -1,77 +1,72 @@
-import { parseDate } from 'chrono-node';
-
-import rp from 'request-promise';
+import { parse } from 'chrono-node';
 
 import {
   bookTimeSlot,
   Course,
-  getCourseAvailability,
-  login
+  getCourseAvailability
 } from 'requests/golfBooking';
 import { getLogin } from 'storage/logins';
+import { getOrCreateSession } from 'shared/sessionCache';
 import { Bot } from 'grammy';
 
 export function bookTimeCommand(bot: Bot): void {
   bot.on('message').command('booktime', async (ctx) => {
     const msg = ctx.msg;
     const command = msg.text;
-    const match = /\/booktime (manor|castle) (.*)/i.exec(command);
+    const match = /\/booktime (.*)/i.exec(command);
 
-    const request = rp.defaults({ jar: rp.jar(), followAllRedirects: true });
-
-    if (match?.length !== 3) {
-      await ctx.reply('Usage is /availableTimes (Manor/Castle) (date)');
+    if (!match?.[1]) {
+      await ctx.reply('Usage: /booktime (date)\nExample: /booktime tomorrow');
       return;
     }
 
-    let courseString = match[1];
-    courseString = courseString[0].toUpperCase() + courseString.substring(1);
-    const course = Course[courseString as keyof typeof Course];
-    const dateString = match[2];
-    const date = parseDate(dateString);
-    if (!date) {
-      await ctx.reply('Could not understand date input!');
-      return;
-    }
-
+    // Fast-fail: check credentials early
     const credentials = await getLogin(msg.from.id);
-
     if (!credentials) {
-      await ctx.reply('You are not authenticated');
+      await ctx.reply('❌ Not authenticated. Use /login first.');
       return;
     }
 
-    await login(request, {
-      username: credentials.username,
-      password: credentials.password
-    });
-    const availableTimes = await getCourseAvailability(request, {
-      course,
-      date
-    });
+    // Parse date asynchronously (non-blocking)
+    const dateString = match[1];
+    const results = parse(dateString);
+    if (!results || results.length === 0) {
+      await ctx.reply('❌ Could not understand date input!\nExample: tomorrow, next Friday, 2026-03-15');
+      return;
+    }
 
-    let message = '<b>Time Booked!</b>\n';
-    message += `<b>Course:</b> ${courseString}\n`;
-    message += `<b>Date:</b> ${date.getDate()}/${
-      date.getMonth() + 1
-    }/${date.getFullYear()}`;
+    const date = results[0].start.date();
 
-    if (availableTimes.length >= 1) {
-      const details = await bookTimeSlot(request, {
-        timeSlot: availableTimes[0]
+    try {
+      // Reuse or create session
+      const request = await getOrCreateSession(msg.from.id, credentials.username, credentials.password);
+
+      const availableTimes = await getCourseAvailability(request, {
+        course: Course.Kilspindie,
+        date
       });
 
-      if (details) {
-        message += `\n\n<b>Date:</b> ${date}\n<b>Time: </b> ${
-          availableTimes[0].time
-        }\n<b>Course:</b> ${
-          details.startingTee.split(' ')[0]
-        }\n<b>Participants:</b> ${details.participants.join(', ')}`;
-      } else {
-        message = '<b>Booking Failed!</b>';
+      if (availableTimes.length === 0) {
+        await ctx.reply(`❌ No available tee times on ${date.toDateString()}`);
+        return;
       }
 
-      await ctx.reply(message, { parse_mode: 'HTML' });
+      const details = await bookTimeSlot(request, { timeSlot: availableTimes[0] });
+
+      if (details) {
+        let message = '<b>✅ Time Booked!</b>\n';
+        message += `<b>Date:</b> ${date.getDate()}/${date.getMonth() + 1}/${date.getFullYear()}\n`;
+        message += `<b>Time:</b> ${availableTimes[0].time}\n`;
+        message += `<b>Course:</b> ${details.startingTee.split(' ')[0]}\n`;
+        message += `<b>Participants:</b> ${details.participants.join(', ')}`;
+        await ctx.reply(message, { parse_mode: 'HTML' });
+      } else {
+        await ctx.reply('❌ Booking failed - no confirmation received');
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      console.error('bookTime error:', error);
+      await ctx.reply(`❌ Error: ${msg}`);
     }
   });
 }

@@ -9,6 +9,7 @@ import { autoBookingsCommand } from 'command/autoBookings';
 import { autoBookCommand } from 'command/autoBook';
 import { recurringBookingsCommand } from 'command/recurringBookings';
 import { addRecurringBookingCommand } from 'command/addRecurringBooking';
+import { partnersCommand } from 'command/partners';
 
 export function registerCommands(bot: Bot): void {
   availableTimesCommand(bot);
@@ -21,4 +22,5 @@ export function registerCommands(bot: Bot): void {
   autoBookingsCommand(bot);
   recurringBookingsCommand(bot);
   addRecurringBookingCommand(bot);
+  partnersCommand(bot);
 }

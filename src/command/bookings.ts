@@ -1,7 +1,6 @@
-import rp from 'request-promise';
-
-import { cancelBooking, getBookings, login } from 'requests/golfBooking';
+import { cancelBooking, getBookings } from 'requests/golfBooking';
 import { getLogin } from 'storage/logins';
+import { getOrCreateSession } from 'shared/sessionCache';
 import { Bot } from 'grammy';
 
 export function bookingsCommand(bot: Bot): void {
@@ -10,21 +9,27 @@ export function bookingsCommand(bot: Bot): void {
     if (query.data && query.data.startsWith('bookings')) {
       const bookingId = query.data.split(':')[1];
 
-      const request = rp.defaults({ jar: rp.jar(), followAllRedirects: true });
-
       const credentials = await getLogin(query.from.id);
 
       if (!credentials) {
-        await ctx.answerCallbackQuery('You are not authenticated');
+        await ctx.answerCallbackQuery('❌ Not authenticated');
         return;
       }
 
-      if (!(await cancelBooking(request, { bookingId: bookingId }))) {
-        await ctx.answerCallbackQuery('Auto Booking Delete Failed');
-        return;
+      try {
+        const request = await getOrCreateSession(query.from.id, credentials.username, credentials.password);
+        const cancelled = await cancelBooking(request, { bookingId });
+
+        if (cancelled) {
+          await ctx.deleteMessage();
+          await ctx.answerCallbackQuery('✅ Booking deleted');
+        } else {
+          await ctx.answerCallbackQuery('❌ Deletion failed');
+        }
+      } catch (error) {
+        console.error('Booking deletion error:', error);
+        await ctx.answerCallbackQuery('❌ Error deleting booking');
       }
-      await ctx.deleteMessage();
-      await ctx.answerCallbackQuery('Booking Deleted');
     }
     await next();
   });
@@ -32,47 +37,57 @@ export function bookingsCommand(bot: Bot): void {
   bot.on('message').command('bookings', async (ctx) => {
     const msg = ctx.msg;
 
-    const request = rp.defaults({ jar: rp.jar(), followAllRedirects: true });
-
     const credentials = await getLogin(msg.from.id);
 
     if (!credentials) {
-      await ctx.reply('You are not authenticated');
+      await ctx.reply('❌ Not authenticated. Use /login first.');
       return;
     }
 
-    await login(request, {
-      username: credentials.username,
-      password: credentials.password
-    });
-    const bookingsResponse = await getBookings(request);
+    try {
+      const startTime = Date.now();
+      const request = await getOrCreateSession(msg.from.id, credentials.username, credentials.password);
+      const bookingsResponse = await getBookings(request);
+      const duration = Date.now() - startTime;
 
-    await ctx.reply('<b>Auto Bookings</b>', { parse_mode: 'HTML' });
+      if (bookingsResponse.length === 0) {
+        await ctx.reply('📅 No upcoming bookings');
+        return;
+      }
 
-    await Promise.all(
-      bookingsResponse.map(async (booking) => {
-        const details = booking.moreDetails;
+      await ctx.reply(`<b>📅 Upcoming Bookings</b> (fetched in ${duration}ms)`, {
+        parse_mode: 'HTML'
+      });
 
-        const message = `\n\n<b>Date:</b> ${booking.date}\n<b>Time: </b> ${
-          booking.time
-        }\n<b>Course:</b> ${
-          details.startingTee.split(' ')[0]
-        }\n<b>Participants:</b> ${details.participants.join(', ')}`;
+      await Promise.all(
+        bookingsResponse.map(async (booking) => {
+          const details = booking.moreDetails;
 
-        await ctx.reply(message, {
-          parse_mode: 'HTML',
-          reply_markup: {
-            inline_keyboard: [
-              [
-                {
-                  callback_data: `bookings:${booking.id}`,
-                  text: 'Delete'
-                }
+          const message = `\n<b>Date:</b> ${booking.date}\n<b>Time:</b> ${
+            booking.time
+          }\n<b>Course:</b> ${
+            details.startingTee.split(' ')[0]
+          }\n<b>Participants:</b> ${details.participants.join(', ')}`;
+
+          await ctx.reply(message, {
+            parse_mode: 'HTML',
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  {
+                    callback_data: `bookings:${booking.id}`,
+                    text: '🗑️ Delete'
+                  }
+                ]
               ]
-            ]
-          }
-        });
-      })
-    );
+            }
+          });
+        })
+      );
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      console.error('Bookings error:', error);
+      await ctx.reply(`❌ Error: ${msg}`);
+    }
   });
 }

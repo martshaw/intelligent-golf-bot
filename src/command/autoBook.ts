@@ -1,4 +1,4 @@
-import { parse as parseDate } from 'chrono-node';
+import { parse } from 'chrono-node';
 
 import { Course } from 'requests/golfBooking';
 import { getLogin } from 'storage/logins';
@@ -9,52 +9,86 @@ export function autoBookCommand(bot: Bot): void {
   bot.on('message').command('autobook', async (ctx) => {
     const msg = ctx.msg;
     const command = msg.text;
-    const match = /\/autobook (manor|castle) (.*)/i.exec(command);
+    const match = /\/autobook (.*)/i.exec(command);
 
-    if (match?.length !== 3) {
+    if (match?.length !== 2) {
       await ctx.reply(
-        'Usage is /autobook (Manor/Castle) (date) from (startTime) - (endTime)'
+        'Usage is /autobook (date) from (startTime) to (endTime)\nExample: /autobook tomorrow from 08:30 to 14:00'
       );
       return;
     }
 
-    let courseString = match[1];
-    courseString = courseString[0].toUpperCase() + courseString.substring(1);
-    const course = Course[courseString as keyof typeof Course];
-    const dateString = match[2];
-    const date = parseDate(dateString);
+    const dateString = match[1];
+    const results = parse(dateString);
 
-    const start = date[0].start.date();
-    const end =
-      date[0].end?.date() ??
-      date[1]?.start.date() ??
-      new Date(new Date(start).setUTCHours(23, 59, 59));
-
-    if (!date[0].end?.date() && !date[1]?.start.date()) {
-      start.setUTCHours(0, 0, 0);
+    if (!results || results.length === 0) {
+      await ctx.reply('❌ Could not understand date/time input!');
+      return;
     }
 
+    let startDate: Date;
+    let endDate: Date | undefined;
+
+    if (results.length >= 2) {
+      // Multiple date/time ranges found (e.g., "tomorrow from 08:30 to 14:00")
+      startDate = results[0].start.date();
+      endDate = results[1].start.date() || results[0].end?.date();
+    } else {
+      // Single date found
+      startDate = results[0].start.date();
+      endDate = results[0].end?.date();
+    }
+
+    // Ensure endDate is set
+    if (!endDate) {
+      endDate = new Date(startDate);
+      endDate.setHours(23, 59, 59);
+    }
+
+    // Validate same day
     if (
-      start.getUTCDate() !== end.getUTCDate() ||
-      start.getUTCMonth() !== end.getUTCMonth()
+      startDate.getUTCDate() !== endDate.getUTCDate() ||
+      startDate.getUTCMonth() !== endDate.getUTCMonth() ||
+      startDate.getUTCFullYear() !== endDate.getUTCFullYear()
     ) {
-      await ctx.reply('You must specify a start and end date on the same day');
+      await ctx.reply('❌ Start and end times must be on the same day!');
+      return;
+    }
+
+    // Validate time order
+    if (startDate.getTime() >= endDate.getTime()) {
+      await ctx.reply(
+        '❌ Start time must be before end time!'
+      );
+      return;
     }
 
     const credentials = await getLogin(msg.from.id);
 
     if (!credentials) {
-      await ctx.reply('You are not authenticated');
+      await ctx.reply('❌ You are not authenticated. Use /login first.');
       return;
     }
 
-    await addAutoBooking(msg.from.id, course, start, end);
+    try {
+      await addAutoBooking(msg.from.id, Course.Kilspindie, startDate, endDate);
 
-    let message = '<b>Auto Booking Added</b>\n';
-    message += `<b>Course:</b> ${courseString}\n`;
-    message += `<b>Start Date:</b> ${start.toISOString()}\n`;
-    message += `<b>End Date:</b> ${end.toISOString()}`;
+      let message = '<b>✅ Auto Booking Added</b>\n';
+      message += `<b>Course:</b> Kilspindie\n`;
+      message += `<b>Date:</b> ${startDate.toDateString()}\n`;
+      message += `<b>Start Time:</b> ${startDate.toLocaleTimeString('en-GB', {
+        hour: '2-digit',
+        minute: '2-digit'
+      })}\n`;
+      message += `<b>End Time:</b> ${endDate.toLocaleTimeString('en-GB', {
+        hour: '2-digit',
+        minute: '2-digit'
+      })}`;
 
-    await ctx.reply(message, { parse_mode: 'HTML' });
+      await ctx.reply(message, { parse_mode: 'HTML' });
+    } catch (error) {
+      console.error('autoBook error:', error);
+      await ctx.reply(`❌ An error occurred: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   });
 }

@@ -12,7 +12,7 @@ export async function login(
 ): Promise<boolean> {
   const options: RequestPromiseOptions = {
     method: 'POST',
-    baseUrl: 'https://cainhoewood.intelligentgolf.co.uk/',
+    baseUrl: 'https://kilspindie.intelligentgolf.co.uk/',
     form: {
       task: 'login',
       topmenu: 1,
@@ -50,7 +50,7 @@ interface TimeSlot {
 export async function getBookings(
   request: RequestAPI<RequestPromise, RequestPromiseOptions, RequiredUriUrl>
 ): Promise<Booking[]> {
-  const html = await request('https://cainhoewood.intelligentgolf.co.uk/');
+  const html = await request('https://kilspindie.intelligentgolf.co.uk/');
   if (!$('title', html).text().includes('Welcome')) return [];
   const bookings = $('div#myteetimes tr', html);
   const parsedBookings: Booking[] = [];
@@ -111,7 +111,7 @@ export async function getBookingDetails(
   }
 ): Promise<BookingDetails> {
   const html: string = await request(
-    `https://cainhoewood.intelligentgolf.co.uk/member_teetime.php?edit=${args.bookingId}`
+    `https://kilspindie.intelligentgolf.co.uk/member_teetime.php?edit=${args.bookingId}`
   );
   return parseBookingDetailsPage(html);
 }
@@ -119,9 +119,7 @@ export async function getBookingDetails(
 // eslint-disable-next-line no-shadow
 export enum Course {
   // eslint-disable-next-line no-unused-vars
-  Manor = 1,
-  // eslint-disable-next-line no-unused-vars
-  Castle = 2
+  Kilspindie = 1
 }
 
 export async function cancelBooking(
@@ -132,7 +130,7 @@ export async function cancelBooking(
 ): Promise<boolean> {
   const options: RequestPromiseOptions = {
     method: 'POST',
-    baseUrl: 'https://cainhoewood.intelligentgolf.co.uk/',
+    baseUrl: 'https://kilspindie.intelligentgolf.co.uk/',
     qs: {
       edit: args.bookingId
     },
@@ -156,32 +154,87 @@ export async function getCourseAvailability(
   const month = args.date.getMonth() + 1;
   const year = args.date.getFullYear();
   const date = `${day}-${month}-${year}`;
+
+  console.log(`[getCourseAvailability] Requesting ${date} for course ${args.course}`);
+
   const options: RequestPromiseOptions = {
     method: 'GET',
-    baseUrl: 'https://cainhoewood.intelligentgolf.co.uk/',
+    baseUrl: 'https://kilspindie.intelligentgolf.co.uk/',
     qs: {
       date,
-      course: args.course.valueOf()
-    }
+      course: args.course.valueOf(),
+      requestType: 'ajax'  // Force AJAX response format
+    },
+    json: true  // Automatically parse JSON
   };
-  const html = await request('/memberbooking/', options);
-  const rows = $(
-    'tr.cantreserve:not(tr.empty-row),tr.canreserve:not(tr.empty-row)',
-    html
-  );
 
+  try {
+    const response = await request('/memberbooking/', options);
+
+    console.log(`[getCourseAvailability] Response type: ${typeof response}`);
+
+    // Handle JSON AJAX response
+    if (typeof response === 'object' && response.teetimes) {
+      const html = response.teetimes;
+
+      // Check for closure message
+      if (html.includes('closed to visitors') || html.includes('no-teetimes-message')) {
+        console.log(`[getCourseAvailability] Club closed on ${date}`);
+        return [];
+      }
+
+      // Parse the teetimes HTML
+      return parseTimeSlots(html);
+    }
+
+    // Handle HTML response (static sites)
+    const html = typeof response === 'string' ? response : JSON.stringify(response);
+    return parseTimeSlots(html);
+
+  } catch (error) {
+    console.error(`[getCourseAvailability] Error:`, error);
+    return [];
+  }
+}
+
+function parseTimeSlots(html: string): TimeSlot[] {
   const availableTimes: TimeSlot[] = [];
 
+  // Try multiple row selectors
+  let rows = $('tr.cantreserve:not(tr.empty-row),tr.canreserve:not(tr.empty-row)', html);
+
+  if (rows.length === 0) {
+    rows = $('tr.canreserve', html);
+  }
+
+  if (rows.length === 0) {
+    rows = $('tr.cantreserve', html);
+  }
+
+  if (rows.length === 0) {
+    rows = $('tr[class*="reserve"]', html);
+  }
+
+  console.log(`[parseTimeSlots] Found ${rows.length} rows`);
+
   rows.each((i, row) => {
-    const bookingButton = $('a.inlineBooking', row);
-    const peopleBooked = $('span.player-name', row);
-    const time = $('th', row).text();
-    const form = $('form fieldset > input', row);
+    const $row = $(row);
+    const bookingButton = $row.find('a.inlineBooking');
+    const peopleBooked = $row.find('span.player-name');
+    const time = $row.find('th').text().trim();
+
+    // Get form data from hidden inputs
+    const form = $row.find('form fieldset > input');
     const bookingForm: { [x: string]: string } = {};
     form.toArray().forEach((field) => {
-      bookingForm[field.attribs.name] = field.attribs.value;
+      if (field.attribs && field.attribs.name && field.attribs.value) {
+        bookingForm[field.attribs.name] = field.attribs.value;
+      }
     });
-    if (peopleBooked.length === 0) {
+
+    // Only add if time exists and no people are booked
+    if (time && time.length > 0 && peopleBooked.length === 0) {
+      console.log(`[parseTimeSlots] Found slot: ${time}, canBook=${bookingButton.length > 0}`);
       availableTimes.push({
         time,
         bookingForm,
@@ -190,6 +243,7 @@ export async function getCourseAvailability(
     }
   });
 
+  console.log(`[getCourseAvailability] Returned ${availableTimes.length} available slots`);
   return availableTimes;
 }
 
@@ -201,25 +255,38 @@ export async function bookTimeSlot(
 ): Promise<BookingDetails | null> {
   const options: RequestPromiseOptions = {
     method: 'GET',
-    baseUrl: 'https://cainhoewood.intelligentgolf.co.uk/',
+    baseUrl: 'https://kilspindie.intelligentgolf.co.uk/',
     qs: {
       numslots: 2,
       ...args.timeSlot.bookingForm
     }
   };
-  const html = await request('/memberbooking/', options);
-  const confirmation = $(
-    '#globalwrap > div.user-messages.alert.user-message-success.alert-success > ul > li > strong',
-    html
-  );
 
-  console.log(confirmation.html());
+  try {
+    const html = await request('/memberbooking/', options);
 
-  if (confirmation.html()) {
-    const details = parseBookingDetailsPage(html);
-    return details;
-  } else {
-    console.log(html);
+    // Try multiple selector patterns for confirmation
+    let confirmation = $('div.user-messages.alert.user-message-success > ul > li > strong', html).html();
+
+    if (!confirmation) {
+      confirmation = $('div.alert-success strong', html).html();
+    }
+
+    if (!confirmation) {
+      confirmation = $('div.alert-success', html).text();
+    }
+
+    console.log('Booking confirmation:', confirmation);
+
+    if (confirmation && confirmation.trim().length > 0) {
+      const details = parseBookingDetailsPage(html);
+      return details;
+    } else {
+      console.error('No confirmation found in response. HTML excerpt:', html.substring(0, 500));
+    }
+  } catch (error) {
+    console.error('bookTimeSlot error:', error);
   }
+
   return null;
 }

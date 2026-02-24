@@ -1,11 +1,11 @@
-import express, { json } from 'express';
+// Load environment variables from .env file
+require('dotenv').config();
 
+import { Bot } from 'grammy';
 import { getEnv } from 'shared/env';
 import { devSetup } from 'devSetup';
 import { registerCommands } from 'command/commands';
 import { scheduledAvailableTimesMonitor } from 'scheduled/availableTimesMonitor';
-import { Bot, webhookCallback } from 'grammy';
-import { v4 as uuid } from 'uuid';
 import { scheduledAutoBookingsMonitor } from 'scheduled/autoBookingsMonitor';
 import { scheduledRecurringBookingsMonitor } from 'scheduled/recurringBookingsMonitor';
 
@@ -23,25 +23,21 @@ export async function handler(): Promise<void> {
 
   registerCommands(bot);
 
-  scheduledAvailableTimesMonitor(bot);
+  // Temporarily disabled: scheduledAvailableTimesMonitor(bot);
   scheduledAutoBookingsMonitor(bot);
   scheduledRecurringBookingsMonitor(bot);
 
-  const host = getEnv('host');
-  const secretPath = `/grammy/${uuid()}`;
-
-  await bot.api.setWebhook(`${host}${secretPath}`);
-
-  const app = express();
-  app.use(json());
-  app.use(secretPath, webhookCallback(bot, 'express', undefined, 60000));
-  app.listen(4123, () => {
-    console.log('Webhook Server Started!');
+  // Use polling for local/OpenClaw deployment (no public IP needed)
+  console.log('Starting bot with polling mode...');
+  await bot.start({
+    onStart: (botInfo) => {
+      console.log(`✅ Bot started: @${botInfo.username}`);
+    }
   });
 }
 
 handler()
-  .then(() => console.log('Bot Running'))
+  .then(() => console.log('Golf Bot Running (Polling Mode)'))
   .catch((error) => {
     console.error('Uncaught Error Thrown', error);
   });

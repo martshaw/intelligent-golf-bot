@@ -16,12 +16,14 @@ export function scheduledAvailableTimesMonitor(bot: Bot): void {
     for (const userKey in monitors) {
       if (Object.hasOwnProperty.call(monitors, userKey)) {
         const userId = Number.parseInt(userKey, 10);
-        const userMonitors = monitors[userKey];
+        const userMonitors = monitors[userKey] ?? [];
+        if (userMonitors.length === 0) continue;
         const request = rp.defaults({
           jar: rp.jar(),
           followAllRedirects: true
         });
         const credentials = await getLogin(userId);
+        if (!credentials) continue;
         await login(request, {
           username: credentials.username,
           password: credentials.password

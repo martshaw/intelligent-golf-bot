@@ -5,8 +5,18 @@ import { Course } from 'requests/golfBooking';
 import { Bot } from 'grammy';
 import { addAutoBooking } from 'storage/autoBookings';
 
+// Global scheduler reference to prevent garbage collection
+let recurringScheduler: ToadScheduler | null = null;
+
 export function scheduledRecurringBookingsMonitor(bot: Bot): void {
-  const scheduler = new ToadScheduler();
+  // Create scheduler once and keep reference
+  if (recurringScheduler) {
+    return; // Already initialized
+  }
+
+  recurringScheduler = new ToadScheduler();
+  const scheduler = recurringScheduler;
+
   const recurringBookingJob = new AsyncTask('recurringBookings', async () => {
     const recurringBookings = await getAllRecurringBookings();
     for (const userKey in recurringBookings) {
@@ -82,4 +92,5 @@ export function scheduledRecurringBookingsMonitor(bot: Bot): void {
   );
 
   scheduler.addCronJob(recurringBookingNightly);
+  console.log('✅ Recurring Bookings Monitor started');
 }

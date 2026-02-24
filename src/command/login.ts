@@ -9,32 +9,39 @@ export function loginCommand(bot: Bot): void {
     const command = msg.text;
     const match = /\/login (\S+) ([0-9A-Za-z]+)/i.exec(command);
 
-    const userId = msg.from.id;
-    if (match?.length !== 3) {
-      await ctx.reply('Usage is /login {username} {password}');
+    if (!match?.[1] || !match?.[2]) {
+      await ctx.reply('Usage: /login {username} {password}\nExample: /login 2192 1234');
       return;
     }
+
     const username = match[1];
     const password = match[2];
+    const userId = msg.from.id;
 
-    const request = rp.defaults({ jar: rp.jar(), followAllRedirects: true });
+    try {
+      const startTime = Date.now();
 
-    if (!msg.from) {
-      return;
+      const request = rp.defaults({
+        jar: rp.jar(),
+        followAllRedirects: true,
+        timeout: 10000 // 10s timeout
+      });
+
+      const loginResult = await login(request, { username, password });
+      const duration = Date.now() - startTime;
+
+      if (loginResult) {
+        await addLogin(userId, username, password);
+        await ctx.reply(
+          `✅ Login succeeded in ${duration}ms\nCredentials saved for future bookings`
+        );
+      } else {
+        await ctx.reply('❌ Login failed - incorrect credentials or server error');
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      console.error('Login error:', error);
+      await ctx.reply(`❌ Login error: ${msg}`);
     }
-
-    const loginResult = await login(request, {
-      username,
-      password
-    });
-
-    let message = 'Login failed, incorrect details';
-
-    if (loginResult) {
-      message = 'Login succeeded, credentials saved';
-      await addLogin(userId, username, password);
-    }
-
-    await ctx.reply(message, { parse_mode: 'HTML' });
   });
 }
