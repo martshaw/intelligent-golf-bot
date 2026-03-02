@@ -103,12 +103,27 @@ export function scheduledRecurringBookingsMonitor(bot: Bot): void {
         const targetEndDate = new Date(targetPlayDate);
         targetEndDate.setHours(endDate.getHours(), endDate.getMinutes(), 0, 0);
 
+        // Pick a random preferred time from the rotation (if configured)
+        let preferredTime: string | undefined;
+        if (recurringBooking.preferredTimes?.length) {
+          const pick = Math.floor(
+            Math.random() * recurringBooking.preferredTimes.length
+          );
+          preferredTime = recurringBooking.preferredTimes[pick];
+          console.log(
+            `[Recurring] randomly selected preferred time: ${preferredTime} from [${recurringBooking.preferredTimes.join(', ')}]`
+          );
+        }
+
         const autoBooking = await addAutoBooking(
           userId,
           course,
           targetPlayDate,
           targetEndDate,
-          { useConfigGolfers: recurringBooking.useConfigGolfers }
+          {
+            useConfigGolfers: recurringBooking.useConfigGolfers,
+            preferredTime
+          }
         );
 
         const bookingOpens = getBookingOpensDate(targetPlayDate);
@@ -122,6 +137,9 @@ export function scheduledRecurringBookingsMonitor(bot: Bot): void {
         message += `<b>Course:</b> ${getGolfClubName()}\n`;
         message += `<b>Play Date:</b> ${dayName}\n`;
         message += `<b>Window:</b> ${autoBooking.startDate.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })} – ${autoBooking.endDate.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}\n`;
+        if (preferredTime) {
+          message += `<b>Target Time:</b> ${preferredTime}\n`;
+        }
         message += `<b>Booking Opens:</b> ${bookingOpens.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })} at ${bookingOpens.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}\n`;
         message += `\nWill auto-book when the window opens.`;
 

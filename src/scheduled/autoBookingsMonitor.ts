@@ -42,6 +42,12 @@ function normalizeTime(t: string): string {
   return `${h.padStart(2, '0')}:${m.padStart(2, '0')}`;
 }
 
+/** Convert HH:MM to total minutes for distance comparison. */
+function timeToMinutes(t: string): number {
+  const [h, m] = t.split(':').map(Number);
+  return (h ?? 0) * 60 + (m ?? 0);
+}
+
 /**
  * Calculate when bookings open for a given play date.
  * Returns the exact datetime when the club allows booking.
@@ -162,8 +168,21 @@ export function scheduledAutoBookingsMonitor(bot: Bot): void {
             `[AutoBook] ${bookingId} ${availability.length} slots in window: ${availability.map((s) => s.time).join(', ')}`
           );
 
-          // Pick slot: earliest by default, or random from top 3 (stealth mode)
-          if (getAutoBookingRandomSlot() && availability.length > 1) {
+          // Sort by proximity to preferred time (if set), otherwise earliest first
+          if (autoBooking.preferredTime) {
+            const pref = normalizeTime(autoBooking.preferredTime);
+            availability.sort((a, b) => {
+              const aN = normalizeTime(a.time);
+              const bN = normalizeTime(b.time);
+              const aDiff = Math.abs(timeToMinutes(aN) - timeToMinutes(pref));
+              const bDiff = Math.abs(timeToMinutes(bN) - timeToMinutes(pref));
+              return aDiff - bDiff;
+            });
+            console.log(
+              `[AutoBook] ${bookingId} preferred=${pref}, sorted: ${availability.map((s) => s.time).join(', ')}`
+            );
+          } else if (getAutoBookingRandomSlot() && availability.length > 1) {
+            // Random from top 3 (stealth mode) — only if no preferred time
             const pick = Math.floor(
               Math.random() * Math.min(3, availability.length)
             );
@@ -258,13 +277,12 @@ export function scheduledAutoBookingsMonitor(bot: Bot): void {
 
   scheduler.addSimpleIntervalJob(autoBookingPoll);
 
-  // FAST POLL: Every 30 seconds around the booking-opens time (HH:45–HH:55).
+  // FAST POLL: Every 2 seconds from booking-opens time for 5 minutes (HH:45–HH:50).
   // This gives us the best chance of grabbing a slot the instant it goes live.
   const bookingHour = getBookingOpensHour();
   const bookingMin = getBookingOpensMinute();
-  const fastPollStart = bookingMin;
-  const fastPollEnd = Math.min(59, bookingMin + 10);
-  const fastPollCron = `*/30 ${fastPollStart}-${fastPollEnd} ${bookingHour} * * *`;
+  const fastPollEnd = Math.min(59, bookingMin + 5);
+  const fastPollCron = `*/2 ${bookingMin}-${fastPollEnd} ${bookingHour} * * *`;
 
   const fastPollJob = new CronJob(
     { cronExpression: fastPollCron },
@@ -277,6 +295,6 @@ export function scheduledAutoBookingsMonitor(bot: Bot): void {
 
   scheduler.addCronJob(fastPollJob);
   console.log(
-    `✅ Auto Bookings Monitor started (5min poll + fast 30s poll at ${bookingHour}:${String(fastPollStart).padStart(2, '0')}–${bookingHour}:${String(fastPollEnd).padStart(2, '0')})`
+    `✅ Auto Bookings Monitor started (5min poll + fast 2s poll at ${bookingHour}:${String(bookingMin).padStart(2, '0')}–${bookingHour}:${String(fastPollEnd).padStart(2, '0')})`
   );
 }

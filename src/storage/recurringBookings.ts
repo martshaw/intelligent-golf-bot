@@ -1,16 +1,25 @@
-import { promises, constants } from 'fs';
+import { promises } from 'fs';
+import path from 'path';
 import { v4 as uuid } from 'uuid';
 
 import { Course } from 'requests/golfBooking';
+import { getDataDir } from 'shared/env';
 
 const fs = promises;
-const fsConstants = constants;
+
+function recurringBookingsPath(): string {
+  return path.join(getDataDir(), 'recurringBookings.json');
+}
 
 export interface RecurringBooking {
   id: string;
   course: Course;
   startDate: Date;
   endDate: Date;
+  /** If true, auto-bookings created from this recurring use golfers from autoBookingConfig.json. */
+  useConfigGolfers?: boolean;
+  /** Preferred tee times to rotate through weekly. Bot randomly picks one each week. */
+  preferredTimes?: string[];
 }
 
 export interface RecurringBookings {
@@ -26,10 +35,9 @@ const dateTimeReviver = (key: string, value: string) => {
 
 async function save(recurringBookings: RecurringBookings): Promise<boolean> {
   await fs.writeFile(
-    'recurringBookings.json',
+    recurringBookingsPath(),
     JSON.stringify(recurringBookings)
   );
-  console.log('Recurring Bookings file has been saved.');
   return true;
 }
 
@@ -37,12 +45,18 @@ let recurringBookingsCache: RecurringBookings | null = null;
 
 async function load(): Promise<RecurringBookings> {
   try {
-    await fs.access('recurringBookings.json', fsConstants.W_OK);
-    const file = await fs.readFile('recurringBookings.json');
-    console.log('Recurring Bookings file has been loaded.');
+    const file = await fs.readFile(recurringBookingsPath());
     return JSON.parse(file.toString(), dateTimeReviver);
-  } catch (error) {
-    console.error('Loading recurring bookings file threw error', error);
+  } catch (error: unknown) {
+    if (
+      error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      error.code === 'ENOENT'
+    ) {
+      return {};
+    }
+    console.error('Loading recurring bookings failed');
     return {};
   }
 }
@@ -62,19 +76,29 @@ export async function getUsersRecurringBookings(
   return recurringBookings[userId];
 }
 
+export interface AddRecurringBookingOptions {
+  useConfigGolfers?: boolean;
+  preferredTimes?: string[];
+}
+
 export async function addRecurringBooking(
   userId: number,
   course: Course,
   startDate: Date,
-  endDate: Date
+  endDate: Date,
+  options?: AddRecurringBookingOptions
 ): Promise<RecurringBooking> {
   const id = uuid();
+  const useConfigGolfers = options?.useConfigGolfers ?? false;
   const recurringBookings: RecurringBookings = await getAllRecurringBookings();
   const userRecurringBookings = recurringBookings[userId] ?? [];
-  userRecurringBookings.push({ id, course, startDate, endDate });
+  const entry: RecurringBooking = { id, course, startDate, endDate };
+  if (useConfigGolfers) entry.useConfigGolfers = true;
+  if (options?.preferredTimes?.length) entry.preferredTimes = options.preferredTimes;
+  userRecurringBookings.push(entry);
   recurringBookings[userId] = userRecurringBookings;
   await save(recurringBookings);
-  return { id, course, startDate, endDate };
+  return entry;
 }
 
 export async function deleteRecurringBooking(
