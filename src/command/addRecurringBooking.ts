@@ -1,6 +1,12 @@
 import { parse as parseDate } from 'chrono-node';
 
 import { Course } from 'requests/golfBooking';
+import {
+  getDaysAheadToBook,
+  getBookingOpensHour,
+  getBookingOpensMinute,
+  getGolfClubName
+} from 'shared/env';
 import { getLogin } from 'storage/logins';
 import { Bot } from 'grammy';
 import { addRecurringBooking } from 'storage/recurringBookings';
@@ -9,19 +15,19 @@ export function addRecurringBookingCommand(bot: Bot): void {
   bot.on('message').command('addrecurringbooking', async (ctx) => {
     const msg = ctx.msg;
     const command = msg.text;
-    const match = /\/addrecurringbooking (manor|castle) (.*)/i.exec(command);
+    const match = /\/addrecurringbooking\s+(.*)/i.exec(command);
 
-    if (match?.length !== 3) {
+    if (!match?.[1]) {
       await ctx.reply(
-        'Usage is /addrecurringbooking (Manor/Castle) (date) from (startTime) to (endTime)'
+        'Usage: /addrecurringbooking (date) from (startTime) to (endTime) [with golfers]\nExample: /addrecurringbooking next Friday from 07:00 to 09:00\nAdd "with golfers" to use names from autoBookingConfig.json'
       );
       return;
     }
 
-    let courseString = match[1];
-    courseString = courseString[0].toUpperCase() + courseString.substring(1);
-    const course = Course[courseString as keyof typeof Course];
-    const dateString = match[2];
+    const course = Course.Kilspindie;
+    const raw = match[1].trim();
+    const useConfigGolfers = /\bwith\s+golfers\b/i.test(raw);
+    const dateString = raw.replace(/\bwith\s+golfers\b/gi, '').trim();
     const date = parseDate(dateString);
 
     const start = date[0].start.date();
@@ -39,6 +45,7 @@ export function addRecurringBookingCommand(bot: Bot): void {
       start.getUTCMonth() !== end.getUTCMonth()
     ) {
       await ctx.reply('You must specify a start and end date on the same day');
+      return;
     }
 
     const credentials = await getLogin(msg.from.id);
@@ -48,18 +55,22 @@ export function addRecurringBookingCommand(bot: Bot): void {
       return;
     }
 
-    await addRecurringBooking(msg.from.id, course, start, end);
+    await addRecurringBooking(msg.from.id, course, start, end, {
+      useConfigGolfers
+    });
 
     const dayName = start.toLocaleDateString('en-GB', {
       weekday: 'long'
     });
+    const daysAhead = getDaysAheadToBook();
+    const bookingHour = getBookingOpensHour();
+    const bookingMin = getBookingOpensMinute();
 
-    let message = '<b>Recurring Booking Added</b>\n';
-    message += `<b>Course:</b> ${courseString}\n`;
-    message += `<b>Day:</b> ${dayName}\n`;
-    message += `<b>Start Time:</b> ${start.toLocaleTimeString()}\n`;
-    message += `<b>End Time:</b> ${end.toLocaleTimeString()}\n`;
-    message += `<b>Note:</b> The first auto booking will be in three weeks time`;
+    let message = '<b>✅ Recurring Booking Added</b>\n';
+    message += `<b>Course:</b> ${getGolfClubName()}\n`;
+    message += `<b>Day:</b> Every ${dayName}\n`;
+    message += `<b>Window:</b> ${start.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })} – ${end.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}\n`;
+    message += `\nAuto-booking will be created ${daysAhead} days before each ${dayName} and executed at ${String(bookingHour).padStart(2, '0')}:${String(bookingMin).padStart(2, '0')} when bookings open.`;
 
     await ctx.reply(message, { parse_mode: 'HTML' });
   });

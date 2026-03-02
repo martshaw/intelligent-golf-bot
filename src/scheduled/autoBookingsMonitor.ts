@@ -1,13 +1,24 @@
-import { AsyncTask, CronJob, ToadScheduler } from 'toad-scheduler';
+import { AsyncTask, CronJob, SimpleIntervalJob, ToadScheduler } from 'toad-scheduler';
 
 import rp from 'request-promise';
 
 import { deleteAutoBooking, getAllAutoBookings } from 'storage/autoBookings';
 import {
+  getAutoBookingConfig,
+  formatGolfersList
+} from 'storage/autoBookingConfig';
+import {
   bookTimeSlot,
   getCourseAvailability,
   login
 } from 'requests/golfBooking';
+import {
+  getAutoBookingRandomSlot,
+  getDaysAheadToBook,
+  getBookingOpensHour,
+  getBookingOpensMinute,
+  getGolfClubName
+} from 'shared/env';
 import { getLogin } from 'storage/logins';
 import { Bot } from 'grammy';
 import { RequestAPI, RequiredUriUrl } from 'request';
@@ -23,33 +34,51 @@ let loginCache: {
 // Global scheduler reference to prevent garbage collection
 let autoScheduler: ToadScheduler | null = null;
 
-export function scheduledAutoBookingsMonitor(bot: Bot): void {
-  // Create scheduler once and keep reference
-  if (autoScheduler) {
-    return; // Already initialized
-  }
+/** Normalize time string to HH:MM for comparison. */
+function normalizeTime(t: string): string {
+  const parts = t.trim().split(':');
+  const h = parts[0]?.replace(/\D/g, '') ?? '0';
+  const m = parts[1]?.replace(/\D/g, '') ?? '0';
+  return `${h.padStart(2, '0')}:${m.padStart(2, '0')}`;
+}
 
+/**
+ * Calculate when bookings open for a given play date.
+ * Returns the exact datetime when the club allows booking.
+ */
+function getBookingOpensAt(playDate: Date): Date {
+  const opens = new Date(playDate);
+  opens.setDate(opens.getDate() - getDaysAheadToBook());
+  opens.setHours(getBookingOpensHour(), getBookingOpensMinute(), 0, 0);
+  return opens;
+}
+
+export function scheduledAutoBookingsMonitor(bot: Bot): void {
+  if (autoScheduler) return;
   autoScheduler = new ToadScheduler();
   const scheduler = autoScheduler;
 
   const autoBookingJob = new AsyncTask('autoBookings', async () => {
     const autoBookings = await getAllAutoBookings();
-    const userIds = Object.keys(autoBookings).map(k => Number.parseInt(k, 10));
+    const userIds = Object.keys(autoBookings).map((k) =>
+      Number.parseInt(k, 10)
+    );
+
+    if (userIds.length === 0) return;
 
     for (const userId of userIds) {
       const userAutoBookings = autoBookings[userId];
 
-      // Ensure login once per user (reuse request across all their bookings)
       let request = loginCache[userId];
       if (!request) {
         request = rp.defaults({
           jar: rp.jar(),
           followAllRedirects: true,
-          timeout: 15000 // 15s timeout to prevent hanging
+          timeout: 15000
         });
         const credentials = await getLogin(userId);
         if (!credentials) {
-          console.warn(`No credentials found for user ${userId}, skipping`);
+          console.warn('[AutoBook] skipping user (no credentials)');
           continue;
         }
         try {
@@ -58,35 +87,44 @@ export function scheduledAutoBookingsMonitor(bot: Bot): void {
             password: credentials.password
           });
           if (!loginSuccess) {
-            console.warn(`Login failed for user ${userId}`);
+            console.warn('[AutoBook] login failed for user');
             continue;
           }
-          console.log(`Logged in as ${userId}`);
           loginCache[userId] = request;
         } catch (error) {
-          console.error(`Login error for user ${userId}:`, error);
+          console.error('[AutoBook] login error');
           continue;
         }
       }
 
-      // Process each booking sequentially (safe: different bookings/dates)
       for (const autoBooking of userAutoBookings) {
         const { course, startDate, endDate } = autoBooking;
-        const timeToStartDate = new Date(startDate).setHours(0, 0, 0, 0) - new Date().getTime();
+        const now = new Date();
+        const bookingId = autoBooking.id.slice(0, 8);
 
-        if (timeToStartDate > 1214000000) {
+        // Clean up expired bookings
+        if (now > endDate) {
+          console.log(`[AutoBook] ${bookingId} expired, removing`);
+          await deleteAutoBooking(autoBooking.id, userId);
+          continue;
+        }
+
+        // BOOKING WINDOW CHECK: Don't poll until bookings have opened.
+        // Bookings open DAYS_AHEAD days before the play date at BOOKING_HOUR:BOOKING_MINUTE.
+        const bookingOpensAt = getBookingOpensAt(startDate);
+        if (now < bookingOpensAt) {
+          const msUntilOpen = bookingOpensAt.getTime() - now.getTime();
+          const hoursUntilOpen = (msUntilOpen / 1000 / 60 / 60).toFixed(1);
           console.log(
-            `Booking ${autoBooking.id.slice(0, 8)} waiting for ${
-              (timeToStartDate - 1214000000) / 1000
-            }s`
+            `[AutoBook] ${bookingId} waiting — booking opens ${bookingOpensAt.toLocaleString('en-GB')} (${hoursUntilOpen}h)`
           );
           continue;
         }
 
-        if (new Date() > endDate) {
-          await deleteAutoBooking(autoBooking.id, userId);
-          continue;
-        }
+        // Bookings are open — try to grab a slot
+        console.log(
+          `[AutoBook] ${bookingId} booking window OPEN, checking availability...`
+        );
 
         try {
           let availability = await getCourseAvailability(request, {
@@ -95,48 +133,55 @@ export function scheduledAutoBookingsMonitor(bot: Bot): void {
           });
 
           console.log(
-            `Found ${availability.length} slots for booking ${autoBooking.id.slice(0, 8)}`
+            `[AutoBook] ${bookingId} found ${availability.length} total slots`
           );
 
           if (availability.length === 0) continue;
 
-          const startTime = `${startDate
-            .getUTCHours()
-            .toString()
-            .padStart(2, '0')}:${startDate
-            .getUTCMinutes()
-            .toString()
-            .padStart(2, '0')}`;
-          const endTime = `${endDate
-            .getUTCHours()
-            .toString()
-            .padStart(2, '0')}:${endDate
-            .getUTCMinutes()
-            .toString()
-            .padStart(2, '0')}`;
-
-          availability = availability.filter(
-            (el) => el.canBook && el.time > startTime && el.time < endTime
+          // Filter to time window using local time (matches club)
+          const startTime = normalizeTime(
+            `${startDate.getHours()}:${startDate.getMinutes()}`
+          );
+          const endTime = normalizeTime(
+            `${endDate.getHours()}:${endDate.getMinutes()}`
           );
 
+          availability = availability.filter((el) => {
+            const t = normalizeTime(el.time);
+            return el.canBook && t >= startTime && t <= endTime;
+          });
+
           if (availability.length === 0) {
-            console.log(`No slots in range ${startTime}-${endTime} for booking ${autoBooking.id.slice(0, 8)}`);
+            console.log(
+              `[AutoBook] ${bookingId} no bookable slots in ${startTime}–${endTime}`
+            );
             continue;
           }
 
-          // Try slots in reverse order (latest first, pop to get earliest in range)
-          availability.reverse();
+          console.log(
+            `[AutoBook] ${bookingId} ${availability.length} slots in window: ${availability.map((s) => s.time).join(', ')}`
+          );
+
+          // Pick slot: earliest by default, or random from top 3 (stealth mode)
+          if (getAutoBookingRandomSlot() && availability.length > 1) {
+            const pick = Math.floor(
+              Math.random() * Math.min(3, availability.length)
+            );
+            const [chosen] = availability.splice(pick, 1);
+            availability.unshift(chosen);
+          }
 
           let bookedSlot = null;
           let bookedTimeSlot = null;
 
-          // Try up to 3 slots only (limit retry attempts)
           const maxAttempts = Math.min(3, availability.length);
           for (let i = 0; i < maxAttempts; i++) {
-            const timeSlot = availability.pop();
+            const timeSlot = availability[i];
             if (!timeSlot) break;
 
-            console.log(`Attempting booking ${autoBooking.id.slice(0, 8)} at ${timeSlot.time}`);
+            console.log(
+              `[AutoBook] ${bookingId} attempting ${timeSlot.time}...`
+            );
             try {
               bookedSlot = await bookTimeSlot(request, { timeSlot });
               if (bookedSlot) {
@@ -144,7 +189,10 @@ export function scheduledAutoBookingsMonitor(bot: Bot): void {
                 break;
               }
             } catch (error) {
-              console.error(`Booking attempt failed:`, error);
+              console.error(
+                `[AutoBook] ${bookingId} booking attempt failed:`,
+                error
+              );
             }
           }
 
@@ -152,59 +200,83 @@ export function scheduledAutoBookingsMonitor(bot: Bot): void {
             let message = '<b>✅ Auto Booked!</b>\n';
             message += `<b>Date:</b> ${startDate.getDate()}/${startDate.getMonth() + 1}/${startDate.getFullYear()}\n`;
             message += `<b>Time:</b> ${bookedTimeSlot.time}\n`;
-            message += `<b>Course:</b> ${
-              bookedSlot.startingTee.split(' ')[0]
-            }\n<b>Participants:</b> ${bookedSlot.participants.join(', ')}`;
+            message += `<b>Course:</b> ${bookedSlot.startingTee?.split(' ')[0] ?? getGolfClubName()}\n`;
+            if (autoBooking.useConfigGolfers) {
+              const config = await getAutoBookingConfig();
+              const golfersList = config.golfers?.length
+                ? formatGolfersList(config.golfers)
+                : null;
+              message += `<b>Participants:</b> ${golfersList ?? bookedSlot.participants.join(', ')}\n`;
+            } else {
+              message += `<b>Participants:</b> ${bookedSlot.participants.join(', ')}\n`;
+            }
 
             await bot.api.sendMessage(userId, message, {
               parse_mode: 'HTML'
             });
+            console.log(
+              `[AutoBook] ${bookingId} SUCCESS — booked ${bookedTimeSlot.time}`
+            );
             await deleteAutoBooking(autoBooking.id, userId);
+          } else {
+            console.log(
+              `[AutoBook] ${bookingId} all attempts failed, will retry next cycle`
+            );
           }
         } catch (error) {
-          console.error(`Error processing booking ${autoBooking.id.slice(0, 8)}:`, error);
+          console.error(
+            `[AutoBook] ${bookingId} error:`,
+            error instanceof Error ? error.message : String(error)
+          );
         }
       }
     }
   });
 
   const clearCache = new AsyncTask('clearLoginCache', async () => {
-    console.log('Clearing login cache');
+    console.log('[AutoBook] clearing login cache');
     loginCache = {};
   });
 
   const clearCacheJob = new CronJob(
-    { cronExpression: '0 0 23 * * *' }, // Daily at 11 PM
+    { cronExpression: '0 0 23 * * *' },
     clearCache
   );
 
   scheduler.addCronJob(clearCacheJob);
 
-  // Run every 5 minutes during booking hours (6 AM - 10 PM)
-  const autoBookingPeakHours = new CronJob(
-    {
-      cronExpression: '*/5 6-22 * * *' // Every 5 min, 6 AM to 10 PM
-    },
+  // Poll every 5 minutes. The booking-window check inside the job
+  // ensures we only hit the club site when bookings are actually open.
+  const autoBookingPoll = new SimpleIntervalJob(
+    { seconds: 300, runImmediately: true },
     autoBookingJob,
     {
-      id: 'autoBookingPeakHours',
+      id: 'autoBookingPoll',
       preventOverrun: true
     }
   );
 
-  // Run once per hour during off-peak hours (10 PM - 6 AM)
-  const autoBookingOffPeak = new CronJob(
-    {
-      cronExpression: '0 22-23,0-5 * * *' // Top of hour during off-peak
-    },
+  scheduler.addSimpleIntervalJob(autoBookingPoll);
+
+  // FAST POLL: Every 30 seconds around the booking-opens time (HH:45–HH:55).
+  // This gives us the best chance of grabbing a slot the instant it goes live.
+  const bookingHour = getBookingOpensHour();
+  const bookingMin = getBookingOpensMinute();
+  const fastPollStart = bookingMin;
+  const fastPollEnd = Math.min(59, bookingMin + 10);
+  const fastPollCron = `*/30 ${fastPollStart}-${fastPollEnd} ${bookingHour} * * *`;
+
+  const fastPollJob = new CronJob(
+    { cronExpression: fastPollCron },
     autoBookingJob,
     {
-      id: 'autoBookingOffPeak',
+      id: 'autoBookingFastPoll',
       preventOverrun: true
     }
   );
 
-  scheduler.addCronJob(autoBookingPeakHours);
-  scheduler.addCronJob(autoBookingOffPeak);
-  console.log('✅ Auto Bookings Monitor started');
+  scheduler.addCronJob(fastPollJob);
+  console.log(
+    `✅ Auto Bookings Monitor started (5min poll + fast 30s poll at ${bookingHour}:${String(fastPollStart).padStart(2, '0')}–${bookingHour}:${String(fastPollEnd).padStart(2, '0')})`
+  );
 }
