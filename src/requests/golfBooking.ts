@@ -453,6 +453,7 @@ export async function bookTimeSlot(
   request: RequestAPI<RequestPromise, RequestPromiseOptions, RequiredUriUrl>,
   args: {
     timeSlot: TimeSlot;
+    numslots?: number;
   }
 ): Promise<BookingResult | null> {
   const baseUrl = getGolfClubBaseUrl();
@@ -464,7 +465,7 @@ export async function bookTimeSlot(
       method: 'GET',
       baseUrl,
       qs: {
-        numslots: getBookingNumSlots(),
+        numslots: args.numslots ?? getBookingNumSlots(),
         ...args.timeSlot.bookingForm
       },
       followRedirect: false,
