@@ -112,7 +112,7 @@ export function bookTimeCommand(bot: Bot): void {
 
     // Parse date asynchronously (non-blocking)
     const dateString = match[1];
-    const results = parse(dateString);
+    const results = parse(dateString, undefined, { forwardDate: true });
     if (!results || results.length === 0) {
       await ctx.reply(
         '❌ Could not understand date input!\nExample: tomorrow, next Friday, 2026-03-15'

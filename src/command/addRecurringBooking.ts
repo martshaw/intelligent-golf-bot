@@ -67,7 +67,7 @@ export function addRecurringBookingCommand(bot: Bot): void {
     const { times: preferredTimes, cleaned: dateString } =
       parsePreferredTimes(raw);
 
-    const date = parseDate(dateString);
+    const date = parseDate(dateString, undefined, { forwardDate: true });
 
     if (!date || date.length === 0) {
       await ctx.reply('❌ Could not understand date/time input!');
@@ -75,7 +75,7 @@ export function addRecurringBookingCommand(bot: Bot): void {
     }
 
     const start = date[0].start.date();
-    const end =
+    let end =
       date[0].end?.date() ??
       date[1]?.start.date() ??
       new Date(new Date(start).setUTCHours(23, 59, 59));
@@ -84,12 +84,21 @@ export function addRecurringBookingCommand(bot: Bot): void {
       start.setUTCHours(0, 0, 0);
     }
 
+    // Clamp end date to same calendar day as start (chrono + forwardDate can
+    // overshoot on day-name ranges like "Sunday from 08:00 to 09:30")
     if (
-      start.getUTCDate() !== end.getUTCDate() ||
-      start.getUTCMonth() !== end.getUTCMonth()
+      end.getFullYear() !== start.getFullYear() ||
+      end.getMonth() !== start.getMonth() ||
+      end.getDate() !== start.getDate()
     ) {
-      await ctx.reply('You must specify a start and end date on the same day');
-      return;
+      const parsedEnd =
+        date[0].end?.date() ?? date[1]?.start.date() ?? null;
+      end = new Date(start);
+      if (parsedEnd) {
+        end.setHours(parsedEnd.getHours(), parsedEnd.getMinutes(), 0, 0);
+      } else {
+        end.setHours(23, 59, 59, 0);
+      }
     }
 
     const credentials = await getLogin(msg.from.id);
