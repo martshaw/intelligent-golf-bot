@@ -10,7 +10,11 @@ import {
 import {
   bookTimeSlot,
   getCourseAvailability,
-  login
+  login,
+  addMemberPartner,
+  addGuestPartner,
+  resolvePartnerIdByName,
+  BookingResult
 } from 'requests/golfBooking';
 import {
   getAutoBookingRandomSlot,
@@ -22,6 +26,10 @@ import {
 import { getLogin } from 'storage/logins';
 import { Bot } from 'grammy';
 import { RequestAPI, RequiredUriUrl } from 'request';
+import {
+  GolferEntry,
+  saveAutoBookingConfig
+} from 'storage/autoBookingConfig';
 
 let loginCache: {
   [key: string]: RequestAPI<
@@ -190,7 +198,7 @@ export function scheduledAutoBookingsMonitor(bot: Bot): void {
             availability.unshift(chosen);
           }
 
-          let bookedSlot = null;
+          let bookedResult: BookingResult | null = null;
           let bookedTimeSlot = null;
 
           const maxAttempts = Math.min(3, availability.length);
@@ -202,8 +210,8 @@ export function scheduledAutoBookingsMonitor(bot: Bot): void {
               `[AutoBook] ${bookingId} attempting ${timeSlot.time}...`
             );
             try {
-              bookedSlot = await bookTimeSlot(request, { timeSlot });
-              if (bookedSlot) {
+              bookedResult = await bookTimeSlot(request, { timeSlot });
+              if (bookedResult) {
                 bookedTimeSlot = timeSlot;
                 break;
               }
@@ -215,12 +223,110 @@ export function scheduledAutoBookingsMonitor(bot: Bot): void {
             }
           }
 
-          if (bookedSlot && bookedTimeSlot) {
+          if (bookedResult && bookedTimeSlot) {
+            const { bookingId: clubBookingId, details: bookedSlot } =
+              bookedResult;
+
+            // --- Partner Assignment ---
+            const partnerResults: string[] = [];
+            if (autoBooking.useConfigGolfers) {
+              const config = await getAutoBookingConfig();
+              const golfers = config.golfers ?? [];
+              // Skip golfer[0] — that's the booker (already Player 1)
+              const partners = golfers.slice(1);
+              let configUpdated = false;
+
+              for (let slot = 2; slot <= partners.length + 1; slot++) {
+                const golfer = partners[slot - 2];
+                if (!golfer) continue;
+
+                // Human-like delay between partner additions (3-8 seconds)
+                const delay =
+                  3000 + Math.floor(Math.random() * 5000);
+                await new Promise((r) => setTimeout(r, delay));
+
+                const fullName = `${golfer.firstname} ${golfer.surname}`;
+                try {
+                  if (golfer.type === 'guest') {
+                    const success = await addGuestPartner(request, {
+                      bookingId: clubBookingId,
+                      slot,
+                      firstname: golfer.firstname,
+                      surname: golfer.surname
+                    });
+                    partnerResults.push(
+                      success
+                        ? `✅ ${fullName} (guest)`
+                        : `❌ ${fullName} (guest failed)`
+                    );
+                  } else {
+                    // Member — use cached partnerId or look it up
+                    let pid = golfer.partnerId ?? null;
+                    if (!pid) {
+                      pid = await resolvePartnerIdByName(request, {
+                        bookingId: clubBookingId,
+                        firstname: golfer.firstname,
+                        surname: golfer.surname
+                      });
+                      if (pid) {
+                        // Cache the partnerId for next time
+                        golfer.partnerId = pid;
+                        configUpdated = true;
+                        console.log(
+                          `[AutoBook] cached partnerId=${pid} for ${fullName}`
+                        );
+                      }
+                    }
+
+                    if (pid) {
+                      const success = await addMemberPartner(request, {
+                        bookingId: clubBookingId,
+                        partnerId: pid,
+                        slot
+                      });
+                      partnerResults.push(
+                        success
+                          ? `✅ ${fullName}`
+                          : `❌ ${fullName} (assign failed)`
+                      );
+                    } else {
+                      partnerResults.push(
+                        `❌ ${fullName} (member not found)`
+                      );
+                    }
+                  }
+                } catch (partnerError) {
+                  console.error(
+                    `[AutoBook] partner error for ${fullName}:`,
+                    partnerError instanceof Error
+                      ? partnerError.message
+                      : String(partnerError)
+                  );
+                  partnerResults.push(
+                    `❌ ${fullName} (error)`
+                  );
+                }
+              }
+
+              // Persist cached partner IDs
+              if (configUpdated) {
+                await saveAutoBookingConfig(config);
+              }
+            }
+
+            // --- Telegram Notification ---
             let message = '<b>✅ Auto Booked!</b>\n';
             message += `<b>Date:</b> ${startDate.getDate()}/${startDate.getMonth() + 1}/${startDate.getFullYear()}\n`;
             message += `<b>Time:</b> ${bookedTimeSlot.time}\n`;
             message += `<b>Course:</b> ${bookedSlot.startingTee?.split(' ')[0] ?? getGolfClubName()}\n`;
-            if (autoBooking.useConfigGolfers) {
+            message += `<b>Booking ID:</b> ${clubBookingId}\n`;
+
+            if (partnerResults.length > 0) {
+              message += `\n<b>Partners:</b>\n`;
+              for (const pr of partnerResults) {
+                message += `  ${pr}\n`;
+              }
+            } else if (autoBooking.useConfigGolfers) {
               const config = await getAutoBookingConfig();
               const golfersList = config.golfers?.length
                 ? formatGolfersList(config.golfers)
