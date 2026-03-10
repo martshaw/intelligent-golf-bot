@@ -1,11 +1,13 @@
 const path = require('path');
 const TsconfigPathsPlugin = require('tsconfig-paths-webpack-plugin');
+const nodeExternals = require('webpack-node-externals');
 
 module.exports = {
   mode: 'production',
   entry: './src/handler.ts',
   cache: true,
   target: 'node',
+  externals: [nodeExternals()],
   module: {
     rules: [
       {

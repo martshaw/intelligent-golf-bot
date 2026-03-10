@@ -1,4 +1,5 @@
 import { cancelBooking, getBookings } from 'requests/golfBooking';
+import { getSafeUserMessage, logError } from 'shared/errorHandling';
 import { getLogin } from 'storage/logins';
 import { getOrCreateSession } from 'shared/sessionCache';
 import { Bot } from 'grammy';
@@ -17,7 +18,11 @@ export function bookingsCommand(bot: Bot): void {
       }
 
       try {
-        const request = await getOrCreateSession(query.from.id, credentials.username, credentials.password);
+        const request = await getOrCreateSession(
+          query.from.id,
+          credentials.username,
+          credentials.password
+        );
         const cancelled = await cancelBooking(request, { bookingId });
 
         if (cancelled) {
@@ -27,7 +32,7 @@ export function bookingsCommand(bot: Bot): void {
           await ctx.answerCallbackQuery('❌ Deletion failed');
         }
       } catch (error) {
-        console.error('Booking deletion error:', error);
+        logError('Booking deletion', error);
         await ctx.answerCallbackQuery('❌ Error deleting booking');
       }
     }
@@ -45,8 +50,13 @@ export function bookingsCommand(bot: Bot): void {
     }
 
     try {
+      await ctx.reply('⏳ Fetching your bookings...');
       const startTime = Date.now();
-      const request = await getOrCreateSession(msg.from.id, credentials.username, credentials.password);
+      const request = await getOrCreateSession(
+        msg.from.id,
+        credentials.username,
+        credentials.password
+      );
       const bookingsResponse = await getBookings(request);
       const duration = Date.now() - startTime;
 
@@ -55,39 +65,34 @@ export function bookingsCommand(bot: Bot): void {
         return;
       }
 
-      await ctx.reply(`<b>📅 Upcoming Bookings</b> (fetched in ${duration}ms)`, {
-        parse_mode: 'HTML'
+      const lines: string[] = [
+        `<b>📅 Upcoming Bookings</b> (${bookingsResponse.length}) — ${duration}ms`,
+        ''
+      ];
+      const inline_keyboard: { callback_data: string; text: string }[][] = [];
+
+      bookingsResponse.forEach((booking) => {
+        const details = booking.moreDetails;
+        const course = details.startingTee.split(' ')[0];
+        const participants = details.participants.join(', ');
+        lines.push(`<b>${booking.date}</b> ${booking.time} · ${course}`);
+        lines.push(`  ${participants}`);
+        lines.push('');
+        inline_keyboard.push([
+          {
+            callback_data: `bookings:${booking.id}`,
+            text: `🗑️ Delete ${booking.date} ${booking.time}`
+          }
+        ]);
       });
 
-      await Promise.all(
-        bookingsResponse.map(async (booking) => {
-          const details = booking.moreDetails;
-
-          const message = `\n<b>Date:</b> ${booking.date}\n<b>Time:</b> ${
-            booking.time
-          }\n<b>Course:</b> ${
-            details.startingTee.split(' ')[0]
-          }\n<b>Participants:</b> ${details.participants.join(', ')}`;
-
-          await ctx.reply(message, {
-            parse_mode: 'HTML',
-            reply_markup: {
-              inline_keyboard: [
-                [
-                  {
-                    callback_data: `bookings:${booking.id}`,
-                    text: '🗑️ Delete'
-                  }
-                ]
-              ]
-            }
-          });
-        })
-      );
+      await ctx.reply(lines.join('\n').trim(), {
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard }
+      });
     } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Unknown error';
-      console.error('Bookings error:', error);
-      await ctx.reply(`❌ Error: ${msg}`);
+      logError('Bookings', error);
+      await ctx.reply(`❌ Error: ${getSafeUserMessage(error)}`);
     }
   });
 }

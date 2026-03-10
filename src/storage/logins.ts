@@ -1,7 +1,13 @@
-import { promises, constants } from 'fs';
+import { promises } from 'fs';
+import path from 'path';
+
+import { getDataDir } from 'shared/env';
 
 const fs = promises;
-const fsConstants = constants;
+
+function loginsPath(): string {
+  return path.join(getDataDir(), 'logins.json');
+}
 
 interface Login {
   username: string;
@@ -13,8 +19,7 @@ interface Logins {
 }
 
 async function save(logins: Logins): Promise<boolean> {
-  await fs.writeFile('logins.json', JSON.stringify(logins));
-  console.log('Logins file has been saved.');
+  await fs.writeFile(loginsPath(), JSON.stringify(logins));
   return true;
 }
 
@@ -22,12 +27,18 @@ let loginCache: Logins | null = null;
 
 async function load(): Promise<Logins> {
   try {
-    await fs.access('logins.json', fsConstants.W_OK);
-    const file = await fs.readFile('logins.json');
-    console.log('Logins file has been loaded.');
-    return JSON.parse(file.toString()) as Logins;
-  } catch (error) {
-    console.error('Loading file threw error', error);
+    const file = await fs.readFile(loginsPath(), 'utf-8');
+    return JSON.parse(file) as Logins;
+  } catch (error: unknown) {
+    if (
+      error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      error.code === 'ENOENT'
+    ) {
+      return {};
+    }
+    console.error('Loading logins failed');
     return {};
   }
 }
@@ -43,6 +54,29 @@ async function getLogins(): Promise<Logins> {
 export async function getLogin(userId: number): Promise<Login> {
   const logins = await getLogins();
   return logins[userId];
+}
+
+/** Returns first stored login (for debug scripts). */
+export async function getFirstLogin(): Promise<{
+  userId: number;
+  username: string;
+  password: string;
+} | null> {
+  const logins = await getLogins();
+  const userId = Object.keys(logins)
+    .map(Number)
+    .find((id) => logins[id]);
+  if (userId === undefined || !logins[userId]) return null;
+  return {
+    userId,
+    username: logins[userId].username,
+    password: logins[userId].password
+  };
+}
+
+/** Call at startup to load logins into memory so first command avoids disk read. */
+export async function preloadLogins(): Promise<void> {
+  await getLogins();
 }
 
 export async function addLogin(

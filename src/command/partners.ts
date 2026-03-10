@@ -1,4 +1,5 @@
 import { getBookings } from 'requests/golfBooking';
+import { getSafeUserMessage, logError } from 'shared/errorHandling';
 import { getLogin } from 'storage/logins';
 import { getOrCreateSession } from 'shared/sessionCache';
 import { Bot } from 'grammy';
@@ -15,7 +16,11 @@ export function partnersCommand(bot: Bot): void {
 
     try {
       const startTime = Date.now();
-      const request = await getOrCreateSession(msg.from.id, credentials.username, credentials.password);
+      const request = await getOrCreateSession(
+        msg.from.id,
+        credentials.username,
+        credentials.password
+      );
       const bookings = await getBookings(request);
       const duration = Date.now() - startTime;
 
@@ -35,8 +40,9 @@ export function partnersCommand(bot: Bot): void {
       });
 
       // Sort by frequency
-      const sorted = Array.from(participantMap.entries())
-        .sort((a, b) => b[1] - a[1]);
+      const sorted = Array.from(participantMap.entries()).sort(
+        (a, b) => b[1] - a[1]
+      );
 
       if (sorted.length === 0) {
         await ctx.reply('👥 No participants found in bookings');
@@ -57,9 +63,8 @@ export function partnersCommand(bot: Bot): void {
 
       await ctx.reply(message, { parse_mode: 'HTML' });
     } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Unknown error';
-      console.error('partners error:', error);
-      await ctx.reply(`❌ Error: ${msg}`);
+      logError('partners', error);
+      await ctx.reply(`❌ Error: ${getSafeUserMessage(error)}`);
     }
   });
 }

@@ -1,5 +1,5 @@
 import { Bot } from 'grammy';
-import { Course } from 'requests/golfBooking';
+import { getGolfClubName } from 'shared/env';
 import {
   deleteRecurringBooking,
   getUsersRecurringBookings
@@ -34,11 +34,11 @@ export function recurringBookingsCommand(bot: Bot): void {
 
     await Promise.all(
       recurringBookings.map(async (recurringBooking) => {
-        const { startDate, endDate, course } = recurringBooking;
+        const { startDate, endDate } = recurringBooking;
         const dayName = startDate.toLocaleDateString('en-GB', {
           weekday: 'long'
         });
-        let message = `<b>Course:</b> ${Course[course]}\n`;
+        let message = `<b>Course:</b> ${getGolfClubName()}\n`;
         message += `<b>Day:</b> ${dayName}\n`;
         message += `<b>Start Time:</b> ${startDate.toLocaleTimeString()}\n`;
         message += `<b>End Time:</b> ${endDate.toLocaleTimeString()}\n`;

@@ -1,10 +1,15 @@
-import { promises, constants } from 'fs';
+import { promises } from 'fs';
+import path from 'path';
 import { v4 as uuid } from 'uuid';
 
 import { Course } from 'requests/golfBooking';
+import { getDataDir } from 'shared/env';
 
 const fs = promises;
-const fsConstants = constants;
+
+function monitorsPath(): string {
+  return path.join(getDataDir(), 'monitors.json');
+}
 
 export interface Monitor {
   id: string;
@@ -25,8 +30,7 @@ const dateTimeReviver = (key: string, value: string) => {
 };
 
 async function save(monitors: Monitors): Promise<boolean> {
-  await fs.writeFile('monitors.json', JSON.stringify(monitors));
-  console.log('Monitors file has been saved.');
+  await fs.writeFile(monitorsPath(), JSON.stringify(monitors));
   return true;
 }
 
@@ -34,14 +38,25 @@ let monitorCache: Monitors | null = null;
 
 async function load(): Promise<Monitors> {
   try {
-    await fs.access('monitors.json', fsConstants.W_OK);
-    const file = await fs.readFile('monitors.json');
-    console.log('Monitors file has been loaded.');
+    const file = await fs.readFile(monitorsPath());
     return JSON.parse(file.toString(), dateTimeReviver);
-  } catch (error) {
-    console.error('Loading monitors file threw error', error);
+  } catch (error: unknown) {
+    if (
+      error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      error.code === 'ENOENT'
+    ) {
+      return {};
+    }
+    console.error('Loading monitors failed');
     return {};
   }
+}
+
+/** Clear in-memory cache so next getAllMonitors() reads from file. Used by scheduler to get latest. */
+export function clearMonitorCache(): void {
+  monitorCache = null;
 }
 
 export async function getAllMonitors(): Promise<Monitors> {

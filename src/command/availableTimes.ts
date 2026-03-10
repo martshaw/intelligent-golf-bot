@@ -1,6 +1,8 @@
 import { parse } from 'chrono-node';
 
 import { Course, getCourseAvailability } from 'requests/golfBooking';
+import { getSafeUserMessage, logError } from 'shared/errorHandling';
+import { getGolfClubName } from 'shared/env';
 import { getLogin } from 'storage/logins';
 import { getOrCreateSession } from 'shared/sessionCache';
 import { Bot } from 'grammy';
@@ -12,11 +14,17 @@ export function availableTimesCommand(bot: Bot): void {
     const match = /\/availabletimes\s+(.*)/i.exec(command);
 
     if (!match?.[1]) {
-      await ctx.reply('Usage: /availabletimes (date)\nExample: /availabletimes today, /availabletimes tomorrow');
+      await ctx.reply(
+        'Usage: /availabletimes (date)\nExample: /availabletimes today, /availabletimes tomorrow'
+      );
       return;
     }
 
-    const dateString = match[1];
+    const dateString = match[1].trim();
+    if (dateString.length > 100) {
+      await ctx.reply('❌ Date text too long.');
+      return;
+    }
     const results = parse(dateString);
     if (!results || results.length === 0) {
       await ctx.reply('❌ Could not understand date input!');
@@ -33,8 +41,13 @@ export function availableTimesCommand(bot: Bot): void {
     }
 
     try {
+      await ctx.reply(`⏳ Checking availability for ${date.toDateString()}...`);
       const startTime = Date.now();
-      const request = await getOrCreateSession(msg.from.id, credentials.username, credentials.password);
+      const request = await getOrCreateSession(
+        msg.from.id,
+        credentials.username,
+        credentials.password
+      );
       const availableTimes = await getCourseAvailability(request, {
         course: Course.Kilspindie,
         date
@@ -43,16 +56,16 @@ export function availableTimesCommand(bot: Bot): void {
 
       if (availableTimes.length === 0) {
         await ctx.reply(
-          `📅 <b>Available Times - Kilspindie</b>\n` +
-          `<b>Date:</b> ${date.toDateString()}\n\n` +
-          `❌ No available tee times\n\n` +
-          `<i>Fetched in ${duration}ms</i>`,
+          `📅 <b>Available Times - ${getGolfClubName()}</b>\n` +
+            `<b>Date:</b> ${date.toDateString()}\n\n` +
+            `❌ No available tee times\n\n` +
+            `<i>Fetched in ${duration}ms</i>`,
           { parse_mode: 'HTML' }
         );
         return;
       }
 
-      let message = `📅 <b>Available Times - Kilspindie</b>\n`;
+      let message = `📅 <b>Available Times - ${getGolfClubName()}</b>\n`;
       message += `<b>Date:</b> ${date.toDateString()}\n`;
       message += `<b>Times Available:</b> ${availableTimes.length}\n\n`;
 
@@ -65,9 +78,8 @@ export function availableTimesCommand(bot: Bot): void {
 
       await ctx.reply(message, { parse_mode: 'HTML' });
     } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Unknown error';
-      console.error('availableTimes error:', error);
-      await ctx.reply(`❌ Error: ${msg}`);
+      logError('availableTimes', error);
+      await ctx.reply(`❌ Error: ${getSafeUserMessage(error)}`);
     }
   });
 }

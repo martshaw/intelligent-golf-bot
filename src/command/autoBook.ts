@@ -1,6 +1,8 @@
 import { parse } from 'chrono-node';
 
 import { Course } from 'requests/golfBooking';
+import { getSafeUserMessage, logError } from 'shared/errorHandling';
+import { getGolfClubName } from 'shared/env';
 import { getLogin } from 'storage/logins';
 import { addAutoBooking } from 'storage/autoBookings';
 import { Bot } from 'grammy';
@@ -13,13 +15,17 @@ export function autoBookCommand(bot: Bot): void {
 
     if (match?.length !== 2) {
       await ctx.reply(
-        'Usage is /autobook (date) from (startTime) to (endTime)\nExample: /autobook tomorrow from 08:30 to 14:00'
+        'Usage: /autobook (date) from (startTime) to (endTime) [with golfers]\nExample: /autobook tomorrow from 08:30 to 14:00\nAdd "with golfers" to use names from autoBookingConfig.json'
       );
       return;
     }
 
-    const dateString = match[1];
-    const results = parse(dateString);
+    const dateString = match[1].trim();
+    const useConfigGolfers = /\bwith\s+golfers\b/i.test(dateString);
+    const dateStringClean = dateString
+      .replace(/\bwith\s+golfers\b/gi, '')
+      .trim();
+    const results = parse(dateStringClean);
 
     if (!results || results.length === 0) {
       await ctx.reply('❌ Could not understand date/time input!');
@@ -57,9 +63,7 @@ export function autoBookCommand(bot: Bot): void {
 
     // Validate time order
     if (startDate.getTime() >= endDate.getTime()) {
-      await ctx.reply(
-        '❌ Start time must be before end time!'
-      );
+      await ctx.reply('❌ Start time must be before end time!');
       return;
     }
 
@@ -71,10 +75,12 @@ export function autoBookCommand(bot: Bot): void {
     }
 
     try {
-      await addAutoBooking(msg.from.id, Course.Kilspindie, startDate, endDate);
+      await addAutoBooking(msg.from.id, Course.Kilspindie, startDate, endDate, {
+        useConfigGolfers
+      });
 
       let message = '<b>✅ Auto Booking Added</b>\n';
-      message += `<b>Course:</b> Kilspindie\n`;
+      message += `<b>Course:</b> ${getGolfClubName()}\n`;
       message += `<b>Date:</b> ${startDate.toDateString()}\n`;
       message += `<b>Start Time:</b> ${startDate.toLocaleTimeString('en-GB', {
         hour: '2-digit',
@@ -87,8 +93,8 @@ export function autoBookCommand(bot: Bot): void {
 
       await ctx.reply(message, { parse_mode: 'HTML' });
     } catch (error) {
-      console.error('autoBook error:', error);
-      await ctx.reply(`❌ An error occurred: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      logError('autoBook', error);
+      await ctx.reply(`❌ An error occurred: ${getSafeUserMessage(error)}`);
     }
   });
 }

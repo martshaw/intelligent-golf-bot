@@ -15,6 +15,8 @@
     "lint:fix": "eslint ./src --fix --ext .ts",
     "prettier:format": "prettier --config .prettierrc \"src/**/*.ts\" --write",
     "start": "node dist/bundle.js",
+    "debug:availability": "yarn build && RUN_AVAILABILITY_DEBUG=1 DEBUG_AVAILABILITY_RAW=1 node -r dotenv/config dist/bundle.js",
+    "debug:availability:tomorrow": "yarn build && RUN_AVAILABILITY_DEBUG=1 DEBUG_AVAILABILITY_DATE=tomorrow node -r dotenv/config dist/bundle.js",
     "start:dev": "nodemon -r dotenv/config --config nodemon.json",
     "test": "yarn test:unit",
     "test:unit": "jest src",
@@ -62,13 +64,15 @@
     "tsconfig-paths-webpack-plugin": "^4.1.0",
     "typescript": "^4.9.5",
     "webpack": "^5.88.2",
-    "webpack-cli": "^5.1.4"
+    "webpack-cli": "^5.1.4",
+    "webpack-node-externals": "^3.0.0"
   },
   "dependencies": {
     "cheerio": "^1.0.0-rc.12",
     "chrono-node": "^2.6.4",
     "croner": "^6.0.7",
     "express": "^4.18.2",
+    "dotenv": "^16.4.5",
     "grammy": "^1.17.2",
     "request": "^2.88.2",
     "request-promise": "^4.2.6",
