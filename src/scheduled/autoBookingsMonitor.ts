@@ -9,8 +9,11 @@ import {
 } from 'storage/autoBookingConfig';
 import {
   bookTimeSlot,
+  getBookings,
   getCourseAvailability,
   login,
+  verifyLoggedIn,
+  NotLoggedInError,
   addMemberPartner,
   addGuestPartner,
   resolvePartnerIdByName,
@@ -38,6 +41,15 @@ let loginCache: {
     RequiredUriUrl
   >;
 } = {};
+
+/** When each cached login was taken (ms since epoch). */
+let loginTakenAt: { [key: string]: number } = {};
+
+/** Entry ids that have already had a fresh login since their window opened. */
+const freshLoginDoneFor = new Set<string>();
+
+/** Cached logins older than this are replaced before window work. */
+const MAX_LOGIN_AGE_MS = 30 * 60 * 1000;
 
 // Global scheduler reference to prevent garbage collection
 let autoScheduler: ToadScheduler | null = null;
@@ -67,6 +79,22 @@ function getBookingOpensAt(playDate: Date): Date {
   return opens;
 }
 
+/**
+ * True if an existing club booking is on the same calendar day as playDate.
+ * Club dates look like "Sunday 18th October" (no year), so compare day + month.
+ */
+function hasBookingOnDay(
+  bookings: { date: string }[],
+  playDate: Date
+): boolean {
+  const month = playDate.toLocaleString('en-GB', { month: 'long' }).toLowerCase();
+  const day = playDate.getDate();
+  return bookings.some((b) => {
+    const m = /(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)/.exec(b.date);
+    return !!m && Number(m[1]) === day && m[2]!.toLowerCase() === month;
+  });
+}
+
 export function scheduledAutoBookingsMonitor(bot: Bot): void {
   if (autoScheduler) return;
   autoScheduler = new ToadScheduler();
@@ -82,6 +110,30 @@ export function scheduledAutoBookingsMonitor(bot: Bot): void {
 
     for (const userId of userIds) {
       const userAutoBookings = autoBookings[userId];
+
+      // Before any entry whose window is open uses the cached login, make
+      // sure it is still valid: the club expires idle sessions long before
+      // the nightly cache clear, and an expired session sees the visitor
+      // page (0 slots).
+      const nowForLogin = new Date();
+      const openEntries = userAutoBookings.filter(
+        (ab) =>
+          nowForLogin <= ab.endDate && nowForLogin >= getBookingOpensAt(ab.startDate)
+      );
+      if (loginCache[userId] && openEntries.length > 0) {
+        const needsFresh = openEntries.some((ab) => !freshLoginDoneFor.has(ab.id));
+        const age = Date.now() - (loginTakenAt[userId] ?? 0);
+        if (needsFresh) {
+          console.log('[AutoBook] fresh login for window');
+          delete loginCache[userId];
+        } else if (age > MAX_LOGIN_AGE_MS) {
+          console.log('[AutoBook] cached login older than 30 min, re-logging in');
+          delete loginCache[userId];
+        } else if (!(await verifyLoggedIn(loginCache[userId]!))) {
+          console.log('[AutoBook] cached login invalid, re-logging in');
+          delete loginCache[userId];
+        }
+      }
 
       let request = loginCache[userId];
       if (!request) {
@@ -105,8 +157,13 @@ export function scheduledAutoBookingsMonitor(bot: Bot): void {
             continue;
           }
           loginCache[userId] = request;
+          loginTakenAt[userId] = Date.now();
+          for (const ab of openEntries) freshLoginDoneFor.add(ab.id);
         } catch (error) {
-          console.error('[AutoBook] login error');
+          console.error(
+            '[AutoBook] login error:',
+            error instanceof Error ? error.message : String(error)
+          );
           continue;
         }
       }
@@ -135,6 +192,23 @@ export function scheduledAutoBookingsMonitor(bot: Bot): void {
           continue;
         }
 
+        // Already booked on this day? Stop polling and drop the request.
+        try {
+          const existing = await getBookings(request);
+          if (hasBookingOnDay(existing, startDate)) {
+            console.log(
+              `[AutoBook] ${bookingId} already booked on ${startDate.toDateString()}, removing`
+            );
+            await deleteAutoBooking(autoBooking.id, userId);
+            continue;
+          }
+        } catch (error) {
+          console.error(
+            `[AutoBook] ${bookingId} existing-booking check failed:`,
+            error instanceof Error ? error.message : String(error)
+          );
+        }
+
         // Bookings are open — try to grab a slot
         console.log(
           `[AutoBook] ${bookingId} booking window OPEN, checking availability...`
@@ -143,7 +217,8 @@ export function scheduledAutoBookingsMonitor(bot: Bot): void {
         try {
           let availability = await getCourseAvailability(request, {
             course,
-            date: startDate
+            date: startDate,
+            throwIfLoggedOut: true
           });
 
           console.log(
@@ -349,6 +424,15 @@ export function scheduledAutoBookingsMonitor(bot: Bot): void {
             );
           }
         } catch (error) {
+          if (error instanceof NotLoggedInError) {
+            // Drop the session so the next check (2s in the fast poll) logs in again.
+            console.warn(
+              `[AutoBook] ${bookingId} not logged in (visitor page), dropping cached login`
+            );
+            delete loginCache[userId];
+            delete loginTakenAt[userId];
+            break;
+          }
           console.error(
             `[AutoBook] ${bookingId} error:`,
             error instanceof Error ? error.message : String(error)
@@ -361,6 +445,7 @@ export function scheduledAutoBookingsMonitor(bot: Bot): void {
   const clearCache = new AsyncTask('clearLoginCache', async () => {
     console.log('[AutoBook] clearing login cache');
     loginCache = {};
+    loginTakenAt = {};
   });
 
   const clearCacheJob = new CronJob(

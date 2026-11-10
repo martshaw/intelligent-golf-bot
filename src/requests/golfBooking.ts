@@ -15,6 +15,10 @@ export async function login(
     password: string;
   }
 ): Promise<boolean> {
+  // The site rejects logins without the _csrf_token from the login page (403).
+  // Fetch the page with the same cookie jar, then echo the token back.
+  const loginPage = await request('login.php', { method: 'GET', baseUrl: getGolfClubBaseUrl() });
+  const csrfToken = cheerio.load(String(loginPage))('input[name=_csrf_token]').attr('value') || '';
   const options: RequestPromiseOptions = {
     method: 'POST',
     baseUrl: getGolfClubBaseUrl(),
@@ -23,7 +27,8 @@ export async function login(
       topmenu: 1,
       memberid: args.username,
       pin: args.password,
-      Submit: 'Login'
+      Submit: 'Login',
+      _csrf_token: csrfToken
     }
   };
   const html = await request('', options);
@@ -285,6 +290,18 @@ function parseTimeSlots(html: string): TimeSlot[] {
   return availableTimes;
 }
 
+export class NotLoggedInError extends Error {
+  constructor() {
+    super('not logged in (visitor page)');
+    this.name = 'NotLoggedInError';
+  }
+}
+
+/** True when a /memberbooking/ page title is the visitor (logged-out) page. */
+export function isLoggedOutBookingTitle(title: string): boolean {
+  return /visitor/i.test(title) || !/member/i.test(title);
+}
+
 /**
  * Fetch available tee times for the member session.
  * No query params on the URL: GET /memberbooking/ then POST /memberbooking/ with body
@@ -295,6 +312,8 @@ export async function getCourseAvailability(
   args: {
     date: Date;
     course: Course;
+    /** Throw NotLoggedInError instead of returning [] when the session is logged out. */
+    throwIfLoggedOut?: boolean;
   }
 ): Promise<TimeSlot[]> {
   const day = args.date.getDate();
@@ -420,20 +439,19 @@ export async function getCourseAvailability(
       headers: fullPageHeaders
     });
     const landingTitle = cheerio.load(landingHtml)('title').text();
-    // The memberbooking page has title like "Member's Teetime Booking at <Club>"
-    // when logged in. The main site has "Welcome to <Club>". Accept either.
-    if (
-      !landingTitle.includes('Welcome') &&
-      !landingTitle.includes('Member') &&
-      !landingTitle.includes('Booking')
-    ) {
-      throw new Error('Session not authenticated for member booking');
+    // Logged in, the memberbooking page title is like "Member's Teetime Booking
+    // at <Club>". An expired session gets the visitor booking page instead,
+    // which still says "Booking" but not "Member".
+    if (isLoggedOutBookingTitle(landingTitle)) {
+      console.warn('[Availability] not logged in (visitor page)');
+      throw new NotLoggedInError();
     }
     let slots = await fetchTeetimesForDate(datePadded);
     if (slots.length > 0) return dropPastSlotsForToday(slots, args.date);
     slots = await fetchTeetimesForDate(dateUnpadded);
     return dropPastSlotsForToday(slots, args.date);
-  } catch (_error) {
+  } catch (error) {
+    if (args.throwIfLoggedOut && error instanceof NotLoggedInError) throw error;
     return [];
   }
 }
