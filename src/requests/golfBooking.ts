@@ -314,6 +314,12 @@ export async function getCourseAvailability(
     course: Course;
     /** Throw NotLoggedInError instead of returning [] when the session is logged out. */
     throwIfLoggedOut?: boolean;
+    /**
+     * Skip the GET /memberbooking/ landing page and go straight to the ajax
+     * tee sheet. Used at the instant a window opens, after the session has
+     * already been verified pre-window, to save a round trip.
+     */
+    skipLanding?: boolean;
   }
 ): Promise<TimeSlot[]> {
   const day = args.date.getDate();
@@ -433,6 +439,10 @@ export async function getCourseAvailability(
   };
 
   try {
+    if (args.skipLanding) {
+      const quick = await fetchTeetimesForDate(datePadded);
+      return dropPastSlotsForToday(quick, args.date);
+    }
     const landingHtml = await request('/memberbooking/', {
       method: 'GET',
       baseUrl,
@@ -523,8 +533,23 @@ export async function bookTimeSlot(
             `[bookTimeSlot] extracted bookingId from body=${bookingId}`
           );
         } else {
+          // Log what the club said (page title + any error/notice text) so a
+          // failed attempt can be diagnosed. Truncated; no form data logged.
+          const $b = cheerio.load(bodyHtml);
+          const title = $b('title').text().replace(/\s+/g, ' ').trim();
+          const notice = $b(
+            '.error, .alert, .message, .notice, .warning, .errorbox, #errors'
+          )
+            .map((_i: number, el: unknown) =>
+              $b(el as Parameters<typeof $b>[0]).text()
+            )
+            .get()
+            .join(' | ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 200);
           console.error(
-            '[bookTimeSlot] no bookingId found — booking may have failed'
+            `[bookTimeSlot] no bookingId found — booking may have failed (title="${title.slice(0, 80)}", notice="${notice}", bodyLen=${bodyHtml.length})`
           );
           return null;
         }

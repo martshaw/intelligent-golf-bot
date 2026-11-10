@@ -2,7 +2,11 @@ import { AsyncTask, CronJob, SimpleIntervalJob, ToadScheduler } from 'toad-sched
 
 import rp from 'request-promise';
 
-import { deleteAutoBooking, getAllAutoBookings } from 'storage/autoBookings';
+import {
+  AutoBooking,
+  deleteAutoBooking,
+  getAllAutoBookings
+} from 'storage/autoBookings';
 import {
   getAutoBookingConfig,
   formatGolfersList
@@ -33,6 +37,11 @@ import {
   GolferEntry,
   saveAutoBookingConfig
 } from 'storage/autoBookingConfig';
+import {
+  normalizeTime,
+  timeToMinutes,
+  snipeWindow
+} from 'scheduled/windowSnipe';
 
 let loginCache: {
   [key: string]: RequestAPI<
@@ -54,19 +63,22 @@ const MAX_LOGIN_AGE_MS = 30 * 60 * 1000;
 // Global scheduler reference to prevent garbage collection
 let autoScheduler: ToadScheduler | null = null;
 
-/** Normalize time string to HH:MM for comparison. */
-function normalizeTime(t: string): string {
-  const parts = t.trim().split(':');
-  const h = parts[0]?.replace(/\D/g, '') ?? '0';
-  const m = parts[1]?.replace(/\D/g, '') ?? '0';
-  return `${h.padStart(2, '0')}:${m.padStart(2, '0')}`;
-}
+type ClubRequest = RequestAPI<
+  rp.RequestPromise<unknown>,
+  rp.RequestPromiseOptions,
+  RequiredUriUrl
+>;
+type BookableSlot = Awaited<ReturnType<typeof getCourseAvailability>>[number];
 
-/** Convert HH:MM to total minutes for distance comparison. */
-function timeToMinutes(t: string): number {
-  const [h, m] = t.split(':').map(Number);
-  return (h ?? 0) * 60 + (m ?? 0);
-}
+/** Users whose pre-window snipe is running; the regular poll skips them. */
+const snipeActiveFor = new Set<number>();
+/** Entry ids that already had a snipe this process (one per entry). */
+const snipedEntries = new Set<string>();
+
+/** Start the pre-window login when the window is at most this far away. */
+const SNIPE_LEAD_MS = 90 * 1000;
+/** How long after the window opens the snipe keeps trying. */
+const SNIPE_DURATION_MS = 20 * 1000;
 
 /**
  * Calculate when bookings open for a given play date.
@@ -95,6 +107,282 @@ function hasBookingOnDay(
   });
 }
 
+/**
+ * After a confirmed booking id: add partners, send the Telegram confirmation,
+ * and remove the auto-booking entry. Shared by the regular poll and the snipe.
+ */
+async function completeAutoBooking(
+  bot: Bot,
+  request: ClubRequest,
+  userId: number,
+  autoBooking: AutoBooking,
+  bookedResult: BookingResult,
+  bookedTimeSlot: { time: string }
+): Promise<void> {
+  const { startDate } = autoBooking;
+  const bookingId = autoBooking.id.slice(0, 8);
+  const { bookingId: clubBookingId, details: bookedSlot } = bookedResult;
+
+  // --- Partner Assignment ---
+  const partnerResults: string[] = [];
+  if (autoBooking.useConfigGolfers) {
+    const config = await getAutoBookingConfig();
+    const golfers = config.golfers ?? [];
+    // Skip golfer[0] — that's the booker (already Player 1)
+    const partners = golfers.slice(1);
+    let configUpdated = false;
+
+    for (let slot = 2; slot <= partners.length + 1; slot++) {
+      const golfer = partners[slot - 2];
+      if (!golfer) continue;
+
+      // Human-like delay between partner additions (3-8 seconds)
+      const delay =
+        3000 + Math.floor(Math.random() * 5000);
+      await new Promise((r) => setTimeout(r, delay));
+
+      const fullName = `${golfer.firstname} ${golfer.surname}`;
+      try {
+        if (golfer.type === 'guest') {
+          const success = await addGuestPartner(request, {
+            bookingId: clubBookingId,
+            slot,
+            firstname: golfer.firstname,
+            surname: golfer.surname
+          });
+          partnerResults.push(
+            success
+              ? `✅ ${fullName} (guest)`
+              : `❌ ${fullName} (guest failed)`
+          );
+        } else {
+          // Member — use cached partnerId or look it up
+          let pid = golfer.partnerId ?? null;
+          if (!pid) {
+            pid = await resolvePartnerIdByName(request, {
+              bookingId: clubBookingId,
+              firstname: golfer.firstname,
+              surname: golfer.surname
+            });
+            if (pid) {
+              // Cache the partnerId for next time
+              golfer.partnerId = pid;
+              configUpdated = true;
+              console.log(
+                `[AutoBook] cached partnerId=${pid} for ${fullName}`
+              );
+            }
+          }
+
+          if (pid) {
+            const success = await addMemberPartner(request, {
+              bookingId: clubBookingId,
+              partnerId: pid,
+              slot
+            });
+            partnerResults.push(
+              success
+                ? `✅ ${fullName}`
+                : `❌ ${fullName} (assign failed)`
+            );
+          } else {
+            partnerResults.push(
+              `❌ ${fullName} (member not found)`
+            );
+          }
+        }
+      } catch (partnerError) {
+        console.error(
+          `[AutoBook] partner error for ${fullName}:`,
+          partnerError instanceof Error
+            ? partnerError.message
+            : String(partnerError)
+        );
+        partnerResults.push(
+          `❌ ${fullName} (error)`
+        );
+      }
+    }
+
+    // Persist cached partner IDs
+    if (configUpdated) {
+      await saveAutoBookingConfig(config);
+    }
+  }
+
+  // --- Telegram Notification ---
+  let message = '<b>✅ Auto Booked!</b>\n';
+  message += `<b>Date:</b> ${startDate.getDate()}/${startDate.getMonth() + 1}/${startDate.getFullYear()}\n`;
+  message += `<b>Time:</b> ${bookedTimeSlot.time}\n`;
+  message += `<b>Course:</b> ${bookedSlot.startingTee?.split(' ')[0] ?? getGolfClubName()}\n`;
+  message += `<b>Booking ID:</b> ${clubBookingId}\n`;
+
+  if (partnerResults.length > 0) {
+    message += `\n<b>Partners:</b>\n`;
+    for (const pr of partnerResults) {
+      message += `  ${pr}\n`;
+    }
+  } else if (autoBooking.useConfigGolfers) {
+    const config = await getAutoBookingConfig();
+    const golfersList = config.golfers?.length
+      ? formatGolfersList(config.golfers)
+      : null;
+    message += `<b>Participants:</b> ${golfersList ?? bookedSlot.participants.join(', ')}\n`;
+  } else {
+    message += `<b>Participants:</b> ${bookedSlot.participants.join(', ')}\n`;
+  }
+
+  await bot.api.sendMessage(userId, message, {
+    parse_mode: 'HTML'
+  });
+  console.log(
+    `[AutoBook] ${bookingId} SUCCESS — booked ${bookedTimeSlot.time}`
+  );
+  await deleteAutoBooking(autoBooking.id, userId);
+}
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((r) => setTimeout(r, Math.max(0, ms)));
+
+/** Log in on a new cookie jar and confirm the member booking page loads. */
+async function freshVerifiedLogin(userId: number): Promise<ClubRequest | null> {
+  const credentials = await getLogin(userId);
+  if (!credentials) return null;
+  const request = rp.defaults({
+    jar: rp.jar(),
+    followAllRedirects: true,
+    timeout: 15000
+  });
+  const ok = await login(request, {
+    username: credentials.username,
+    password: credentials.password
+  });
+  if (!ok) return null;
+  return request;
+}
+
+/**
+ * Pre-window snipe for one user's entries opening within SNIPE_LEAD_MS:
+ * log in fresh ~60-90 s early, verify the session and the same-day rule,
+ * then at the opening instant fetch only the ajax tee sheet and book via
+ * snipeWindow (preferred first, short retries, fallback inside the window).
+ * Anything not booked here is left to the regular 2 s fast poll.
+ */
+async function runWindowSnipe(
+  bot: Bot,
+  userId: number,
+  entries: AutoBooking[]
+): Promise<void> {
+  const [first] = entries;
+  if (!first) return;
+  snipeActiveFor.add(userId);
+  for (const e of entries) snipedEntries.add(e.id);
+  try {
+    let request: ClubRequest | null = null;
+    for (let attempt = 1; attempt <= 2 && !request; attempt++) {
+      try {
+        const candidate = await freshVerifiedLogin(userId);
+        if (!candidate) {
+          console.warn(`[Snipe] pre-window login failed (try ${attempt})`);
+          continue;
+        }
+        // Landing page + sheet: throws if the session is the visitor page.
+        await getCourseAvailability(candidate, {
+          course: first.course,
+          date: first.startDate,
+          throwIfLoggedOut: true
+        });
+        request = candidate;
+      } catch (error) {
+        console.warn(
+          `[Snipe] pre-window session check failed (try ${attempt}):`,
+          error instanceof Error ? error.message : String(error)
+        );
+      }
+    }
+    if (!request) return;
+    loginCache[userId] = request;
+    loginTakenAt[userId] = Date.now();
+    for (const e of entries) freshLoginDoneFor.add(e.id);
+    console.log('[Snipe] pre-window login verified');
+
+    for (const autoBooking of entries) {
+      const { course, startDate, endDate } = autoBooking;
+      const shortId = autoBooking.id.slice(0, 8);
+      const opensAt = getBookingOpensAt(startDate).getTime();
+
+      try {
+        const existing = await getBookings(request);
+        if (hasBookingOnDay(existing, startDate)) {
+          console.log(
+            `[Snipe] ${shortId} already booked on ${startDate.toDateString()}, removing`
+          );
+          await deleteAutoBooking(autoBooking.id, userId);
+          continue;
+        }
+      } catch (error) {
+        console.error(
+          `[Snipe] ${shortId} existing-booking check failed:`,
+          error instanceof Error ? error.message : String(error)
+        );
+      }
+
+      const waitMs = opensAt - Date.now();
+      console.log(
+        `[Snipe] ${shortId} ready; waiting ${(waitMs / 1000).toFixed(1)}s for ${new Date(opensAt).toLocaleTimeString('en-GB')}`
+      );
+      await sleep(waitMs);
+      const req = request;
+      const outcome = await snipeWindow<BookableSlot, BookingResult>(
+        {
+          fetchSlots: () =>
+            getCourseAvailability(req, {
+              course,
+              date: startDate,
+              skipLanding: true
+            }),
+          book: (slot) => bookTimeSlot(req, { timeSlot: slot }),
+          now: () => Date.now(),
+          sleep,
+          log: (msg) => console.log(`[Snipe] ${shortId} ${msg}`)
+        },
+        {
+          windowStart: normalizeTime(
+            `${startDate.getHours()}:${startDate.getMinutes()}`
+          ),
+          windowEnd: normalizeTime(
+            `${endDate.getHours()}:${endDate.getMinutes()}`
+          ),
+          preferredTime: autoBooking.preferredTime,
+          deadline: Math.max(opensAt, Date.now()) + SNIPE_DURATION_MS
+        }
+      );
+      if (outcome) {
+        console.log(
+          `[Snipe] ${shortId} booked ${outcome.slot.time} id=${outcome.result.bookingId}`
+        );
+        await completeAutoBooking(
+          bot,
+          req,
+          userId,
+          autoBooking,
+          outcome.result,
+          outcome.slot
+        );
+      } else {
+        console.log(`[Snipe] ${shortId} no booking; fast poll will continue`);
+      }
+    }
+  } catch (error) {
+    console.error(
+      '[Snipe] error:',
+      error instanceof Error ? error.message : String(error)
+    );
+  } finally {
+    snipeActiveFor.delete(userId);
+  }
+}
+
 export function scheduledAutoBookingsMonitor(bot: Bot): void {
   if (autoScheduler) return;
   autoScheduler = new ToadScheduler();
@@ -109,6 +397,8 @@ export function scheduledAutoBookingsMonitor(bot: Bot): void {
     if (userIds.length === 0) return;
 
     for (const userId of userIds) {
+      // A pre-window snipe owns this user's session until it finishes.
+      if (snipeActiveFor.has(userId)) continue;
       const userAutoBookings = autoBookings[userId];
 
       // Before any entry whose window is open uses the cached login, make
@@ -299,125 +589,14 @@ export function scheduledAutoBookingsMonitor(bot: Bot): void {
           }
 
           if (bookedResult && bookedTimeSlot) {
-            const { bookingId: clubBookingId, details: bookedSlot } =
-              bookedResult;
-
-            // --- Partner Assignment ---
-            const partnerResults: string[] = [];
-            if (autoBooking.useConfigGolfers) {
-              const config = await getAutoBookingConfig();
-              const golfers = config.golfers ?? [];
-              // Skip golfer[0] — that's the booker (already Player 1)
-              const partners = golfers.slice(1);
-              let configUpdated = false;
-
-              for (let slot = 2; slot <= partners.length + 1; slot++) {
-                const golfer = partners[slot - 2];
-                if (!golfer) continue;
-
-                // Human-like delay between partner additions (3-8 seconds)
-                const delay =
-                  3000 + Math.floor(Math.random() * 5000);
-                await new Promise((r) => setTimeout(r, delay));
-
-                const fullName = `${golfer.firstname} ${golfer.surname}`;
-                try {
-                  if (golfer.type === 'guest') {
-                    const success = await addGuestPartner(request, {
-                      bookingId: clubBookingId,
-                      slot,
-                      firstname: golfer.firstname,
-                      surname: golfer.surname
-                    });
-                    partnerResults.push(
-                      success
-                        ? `✅ ${fullName} (guest)`
-                        : `❌ ${fullName} (guest failed)`
-                    );
-                  } else {
-                    // Member — use cached partnerId or look it up
-                    let pid = golfer.partnerId ?? null;
-                    if (!pid) {
-                      pid = await resolvePartnerIdByName(request, {
-                        bookingId: clubBookingId,
-                        firstname: golfer.firstname,
-                        surname: golfer.surname
-                      });
-                      if (pid) {
-                        // Cache the partnerId for next time
-                        golfer.partnerId = pid;
-                        configUpdated = true;
-                        console.log(
-                          `[AutoBook] cached partnerId=${pid} for ${fullName}`
-                        );
-                      }
-                    }
-
-                    if (pid) {
-                      const success = await addMemberPartner(request, {
-                        bookingId: clubBookingId,
-                        partnerId: pid,
-                        slot
-                      });
-                      partnerResults.push(
-                        success
-                          ? `✅ ${fullName}`
-                          : `❌ ${fullName} (assign failed)`
-                      );
-                    } else {
-                      partnerResults.push(
-                        `❌ ${fullName} (member not found)`
-                      );
-                    }
-                  }
-                } catch (partnerError) {
-                  console.error(
-                    `[AutoBook] partner error for ${fullName}:`,
-                    partnerError instanceof Error
-                      ? partnerError.message
-                      : String(partnerError)
-                  );
-                  partnerResults.push(
-                    `❌ ${fullName} (error)`
-                  );
-                }
-              }
-
-              // Persist cached partner IDs
-              if (configUpdated) {
-                await saveAutoBookingConfig(config);
-              }
-            }
-
-            // --- Telegram Notification ---
-            let message = '<b>✅ Auto Booked!</b>\n';
-            message += `<b>Date:</b> ${startDate.getDate()}/${startDate.getMonth() + 1}/${startDate.getFullYear()}\n`;
-            message += `<b>Time:</b> ${bookedTimeSlot.time}\n`;
-            message += `<b>Course:</b> ${bookedSlot.startingTee?.split(' ')[0] ?? getGolfClubName()}\n`;
-            message += `<b>Booking ID:</b> ${clubBookingId}\n`;
-
-            if (partnerResults.length > 0) {
-              message += `\n<b>Partners:</b>\n`;
-              for (const pr of partnerResults) {
-                message += `  ${pr}\n`;
-              }
-            } else if (autoBooking.useConfigGolfers) {
-              const config = await getAutoBookingConfig();
-              const golfersList = config.golfers?.length
-                ? formatGolfersList(config.golfers)
-                : null;
-              message += `<b>Participants:</b> ${golfersList ?? bookedSlot.participants.join(', ')}\n`;
-            } else {
-              message += `<b>Participants:</b> ${bookedSlot.participants.join(', ')}\n`;
-            }
-
-            await bot.api.sendMessage(userId, message, {
-              parse_mode: 'HTML'
-            });
-            console.log(
-              `[AutoBook] ${bookingId} SUCCESS — booked ${bookedTimeSlot.time}`
+            await completeAutoBooking(
+              bot,
+              request,
+              userId,
+              autoBooking,
+              bookedResult,
+              bookedTimeSlot
             );
-            await deleteAutoBooking(autoBooking.id, userId);
           } else {
             console.log(
               `[AutoBook] ${bookingId} all attempts failed, will retry next cycle`
@@ -467,6 +646,31 @@ export function scheduledAutoBookingsMonitor(bot: Bot): void {
   );
 
   scheduler.addSimpleIntervalJob(autoBookingPoll);
+
+  // SNIPE CHECK: every 15 s, start a pre-window snipe for any entry whose
+  // window opens within SNIPE_LEAD_MS (so login starts ~75-90 s early).
+  const snipeCheck = new AsyncTask('autoBookingSnipeCheck', async () => {
+    const all = await getAllAutoBookings();
+    const now = Date.now();
+    for (const key of Object.keys(all)) {
+      const userId = Number.parseInt(key, 10);
+      if (snipeActiveFor.has(userId)) continue;
+      const due = (all[userId] ?? []).filter((ab) => {
+        if (snipedEntries.has(ab.id)) return false;
+        const lead = getBookingOpensAt(ab.startDate).getTime() - now;
+        return lead > 0 && lead <= SNIPE_LEAD_MS && now < ab.endDate.getTime();
+      });
+      if (due.length === 0) continue;
+      console.log(`[Snipe] starting for ${due.length} entr${due.length === 1 ? 'y' : 'ies'}`);
+      void runWindowSnipe(bot, userId, due);
+    }
+  });
+  scheduler.addSimpleIntervalJob(
+    new SimpleIntervalJob({ seconds: 15, runImmediately: true }, snipeCheck, {
+      id: 'autoBookingSnipeCheck',
+      preventOverrun: true
+    })
+  );
 
   // FAST POLL: Every 2 seconds from booking-opens time for 5 minutes (HH:45–HH:50).
   // This gives us the best chance of grabbing a slot the instant it goes live.
