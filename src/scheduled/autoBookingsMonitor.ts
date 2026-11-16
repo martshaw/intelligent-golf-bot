@@ -40,7 +40,8 @@ import {
 import {
   normalizeTime,
   timeToMinutes,
-  snipeWindow
+  snipeWindow,
+  filterAllowedTimes
 } from 'scheduled/windowSnipe';
 
 let loginCache: {
@@ -354,6 +355,7 @@ async function runWindowSnipe(
             `${endDate.getHours()}:${endDate.getMinutes()}`
           ),
           preferredTime: autoBooking.preferredTime,
+          allowedTimes: autoBooking.allowedTimes,
           deadline: Math.max(opensAt, Date.now()) + SNIPE_DURATION_MS
         }
       );
@@ -525,14 +527,20 @@ export function scheduledAutoBookingsMonitor(bot: Bot): void {
             `${endDate.getHours()}:${endDate.getMinutes()}`
           );
 
-          availability = availability.filter((el) => {
-            const t = normalizeTime(el.time);
-            return el.canBook && t >= startTime && t <= endTime;
-          });
+          availability = filterAllowedTimes(
+            availability.filter((el) => {
+              const t = normalizeTime(el.time);
+              return el.canBook && t >= startTime && t <= endTime;
+            }),
+            autoBooking.allowedTimes
+          );
 
           if (availability.length === 0) {
+            const range = autoBooking.allowedTimes?.length
+              ? `allowed times ${autoBooking.allowedTimes.map(normalizeTime).join(', ')}`
+              : `${startTime}–${endTime}`;
             console.log(
-              `[AutoBook] ${bookingId} no bookable slots in ${startTime}–${endTime}`
+              `[AutoBook] ${bookingId} no bookable slots in ${range}`
             );
             continue;
           }

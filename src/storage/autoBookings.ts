@@ -20,6 +20,8 @@ export interface AutoBooking {
   useConfigGolfers?: boolean;
   /** Preferred exact time (HH:MM). Bot tries this first, then nearest in window. */
   preferredTime?: string;
+  /** If set, only these HH:MM times may be booked (must also be inside the window). */
+  allowedTimes?: string[];
 }
 
 export interface AutoBookings {

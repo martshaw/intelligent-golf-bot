@@ -7,14 +7,14 @@ const mk = (times: string[], bookable: string[]): Slot[] =>
   times.map((t) => ({ time: t, canBook: bookable.includes(t), id: t }));
 const ALL = ['10:08', '10:16', '10:24', '10:32', '10:40', '10:48', '15:12'];
 
-async function run(name: string, sheets: Slot[][], bookOk: (t: string, n: number) => boolean, pref = '10:24') {
+async function run(name: string, sheets: Slot[][], bookOk: (t: string, n: number) => boolean, pref = '10:24', extra: { allowedTimes?: string[] } = {}) {
   let clock = 0; let fetches = 0; const tries: string[] = []; const logs: string[] = [];
   const count: Record<string, number> = {};
   const res = await snipeWindow<Slot, string>({
     fetchSlots: async () => { clock += 300; const s = sheets[Math.min(fetches, sheets.length - 1)]!; fetches++; return s; },
     book: async (s) => { clock += 250; count[s.time] = (count[s.time] ?? 0) + 1; tries.push(s.time); return bookOk(s.time, count[s.time]!) ? `id-${s.time}` : null; },
     now: () => clock, sleep: async (ms) => { clock += ms; }, log: (m) => logs.push(m)
-  }, { windowStart: '10:16', windowEnd: '10:40', preferredTime: pref, deadline: 20000 });
+  }, { windowStart: '10:16', windowEnd: '10:40', preferredTime: pref, deadline: 20000, ...extra });
   console.log(`${name}: tries=[${tries.join(', ')}] result=${res?.slot.time ?? 'none'} fetches=${fetches} t=${clock}ms`);
   return { res, tries, fetches, clock };
 }
@@ -47,5 +47,14 @@ async function run(name: string, sheets: Slot[][], bookOk: (t: string, n: number
   // 7. Deadline: never released -> stops by deadline with no attempts.
   r = await run('deadline', [closed], () => true);
   assert.strictEqual(r.res, null); assert.ok(r.clock >= 20000 && r.clock < 21000);
+  // 8. allowedTimes: books preferred first; never tries 10:16 or 10:32.
+  const allInWindow = mk(ALL, ['10:16', '10:24', '10:32', '10:40']);
+  r = await run('allowed-pref-first', [allInWindow], () => true, '10:24', { allowedTimes: ['10:24', '10:40'] });
+  assert.deepStrictEqual(r.tries, ['10:24']); assert.strictEqual(r.res?.slot.time, '10:24');
+  // 9. allowedTimes: 10:24 fails, falls back to 10:40 only — never 10:16 or 10:32.
+  r = await run('allowed-skip-1032', [allInWindow], (t) => t === '10:40', '10:24', { allowedTimes: ['10:24', '10:40'] });
+  assert.deepStrictEqual(r.tries, ['10:24', '10:24', '10:24', '10:24', '10:40']);
+  assert.strictEqual(r.res?.slot.time, '10:40');
+  assert.ok(!r.tries.includes('10:32') && !r.tries.includes('10:16'));
   console.log('ALL CHECKS PASSED');
 })().catch((e) => { console.error(e); process.exit(1); });

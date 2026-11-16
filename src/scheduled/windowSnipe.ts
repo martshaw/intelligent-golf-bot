@@ -39,6 +39,8 @@ export interface SnipeOptions {
   maxOtherAttempts?: number;
   /** Pause between sheet fetches while the window has not been released. */
   releasePollMs?: number;
+  /** If set, only these HH:MM times may be booked (must also be in the window). */
+  allowedTimes?: string[];
 }
 
 /** Normalize time string to HH:MM for comparison. */
@@ -82,6 +84,16 @@ export function sortByPreference<S extends SnipeSlot>(
   );
 }
 
+/** If allowedTimes is set, keep only those HH:MM times. */
+export function filterAllowedTimes<S extends SnipeSlot>(
+  slots: S[],
+  allowedTimes?: string[]
+): S[] {
+  if (!allowedTimes?.length) return slots;
+  const allowed = new Set(allowedTimes.map(normalizeTime));
+  return slots.filter((s) => allowed.has(normalizeTime(s.time)));
+}
+
 export async function snipeWindow<S extends SnipeSlot, R>(
   deps: SnipeDeps<S, R>,
   opts: SnipeOptions
@@ -113,15 +125,19 @@ export async function snipeWindow<S extends SnipeSlot, R>(
     }
 
     const inWindow = sortByPreference(
-      slotsInWindow(slots, opts.windowStart, opts.windowEnd),
+      filterAllowedTimes(
+        slotsInWindow(slots, opts.windowStart, opts.windowEnd),
+        opts.allowedTimes
+      ),
       pref
     );
 
     if (inWindow.length === 0) {
       if (slots.some((s) => s.canBook)) {
-        deps.log(
-          `sheet released but no bookable slots in ${opts.windowStart}–${opts.windowEnd}`
-        );
+        const range = opts.allowedTimes?.length
+          ? `allowed times ${opts.allowedTimes.map(normalizeTime).join(', ')}`
+          : `${opts.windowStart}–${opts.windowEnd}`;
+        deps.log(`sheet released but no bookable slots in ${range}`);
         return null;
       }
       // Nothing bookable at all yet: the day has not been released.
