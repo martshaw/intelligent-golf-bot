@@ -1,11 +1,9 @@
-import { promises } from 'fs';
 import path from 'path';
 import { v4 as uuid } from 'uuid';
 
 import { Course } from 'requests/golfBooking';
 import { getDataDir } from 'shared/env';
-
-const fs = promises;
+import { readJsonFile, writeJsonAtomic } from 'storage/jsonFile';
 
 function monitorsPath(): string {
   return path.join(getDataDir(), 'monitors.json');
@@ -30,28 +28,14 @@ const dateTimeReviver = (key: string, value: string) => {
 };
 
 async function save(monitors: Monitors): Promise<boolean> {
-  await fs.writeFile(monitorsPath(), JSON.stringify(monitors));
+  await writeJsonAtomic(monitorsPath(), monitors);
   return true;
 }
 
 let monitorCache: Monitors | null = null;
 
 async function load(): Promise<Monitors> {
-  try {
-    const file = await fs.readFile(monitorsPath());
-    return JSON.parse(file.toString(), dateTimeReviver);
-  } catch (error: unknown) {
-    if (
-      error &&
-      typeof error === 'object' &&
-      'code' in error &&
-      error.code === 'ENOENT'
-    ) {
-      return {};
-    }
-    console.error('Loading monitors failed');
-    return {};
-  }
+  return (await readJsonFile<Monitors>(monitorsPath(), dateTimeReviver)) ?? {};
 }
 
 /** Clear in-memory cache so next getAllMonitors() reads from file. Used by scheduler to get latest. */

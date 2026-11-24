@@ -1,9 +1,7 @@
-import { promises } from 'fs';
 import path from 'path';
 
 import { getDataDir } from 'shared/env';
-
-const fs = promises;
+import { readJsonFile, writeJsonAtomic } from 'storage/jsonFile';
 
 /** One golfer in auto-booking config (names only; credentials come from login/env). */
 export interface GolferEntry {
@@ -24,50 +22,36 @@ function configPath(): string {
 
 let configCache: AutoBookingConfig | null = null;
 
-/** Load auto-booking config (golfers list). Returns empty config if file missing or invalid. */
+/**
+ * Load auto-booking config (golfers list). Missing file → empty config.
+ * A corrupt file throws (see readJsonFile) instead of silently dropping golfers.
+ */
 export async function getAutoBookingConfig(): Promise<AutoBookingConfig> {
   if (configCache) return configCache;
-  try {
-    const file = await fs.readFile(configPath());
-    const parsed = JSON.parse(file.toString()) as AutoBookingConfig;
-    if (!parsed || typeof parsed !== 'object') {
-      configCache = {};
-      return configCache;
-    }
-    if (Array.isArray(parsed.golfers)) {
-      parsed.golfers = parsed.golfers.filter(
+  const parsed = await readJsonFile<AutoBookingConfig>(configPath());
+  if (!parsed || typeof parsed !== 'object') {
+    configCache = {};
+    return configCache;
+  }
+  parsed.golfers = Array.isArray(parsed.golfers)
+    ? parsed.golfers.filter(
         (g): g is GolferEntry =>
           g &&
           typeof g === 'object' &&
           (g.type === 'member' || g.type === 'guest') &&
           typeof g.firstname === 'string' &&
           typeof g.surname === 'string'
-      );
-    } else {
-      parsed.golfers = [];
-    }
-    configCache = parsed;
-    return configCache;
-  } catch (error: unknown) {
-    if (
-      error &&
-      typeof error === 'object' &&
-      'code' in error &&
-      (error as NodeJS.ErrnoException).code === 'ENOENT'
-    ) {
-      configCache = {};
-      return configCache;
-    }
-    configCache = {};
-    return configCache;
-  }
+      )
+    : [];
+  configCache = parsed;
+  return configCache;
 }
 
 /** Persist config back to disk (e.g. after caching partner IDs). */
 export async function saveAutoBookingConfig(
   config: AutoBookingConfig
 ): Promise<void> {
-  await fs.writeFile(configPath(), JSON.stringify(config, null, 2));
+  await writeJsonAtomic(configPath(), config, 2);
   configCache = config;
 }
 

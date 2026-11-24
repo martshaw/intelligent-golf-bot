@@ -1,12 +1,10 @@
-import { promises } from 'fs';
 import path from 'path';
 import { v4 as uuid } from 'uuid';
 
 import { Course } from 'requests/golfBooking';
 import { getDataDir } from 'shared/env';
+import { readJsonFile, writeJsonAtomic } from 'storage/jsonFile';
 import type { GolferEntry } from 'storage/autoBookingConfig';
-
-const fs = promises;
 
 function autoBookingsPath(): string {
   return path.join(getDataDir(), 'autoBookings.json');
@@ -42,28 +40,17 @@ const dateTimeReviver = (key: string, value: string) => {
 };
 
 async function save(autoBookings: AutoBookings): Promise<boolean> {
-  await fs.writeFile(autoBookingsPath(), JSON.stringify(autoBookings));
+  await writeJsonAtomic(autoBookingsPath(), autoBookings);
   return true;
 }
 
 let autoBookingsCache: AutoBookings | null = null;
 
 async function load(): Promise<AutoBookings> {
-  try {
-    const file = await fs.readFile(autoBookingsPath());
-    return JSON.parse(file.toString(), dateTimeReviver);
-  } catch (error: unknown) {
-    if (
-      error &&
-      typeof error === 'object' &&
-      'code' in error &&
-      error.code === 'ENOENT'
-    ) {
-      return {};
-    }
-    console.error('Loading auto bookings failed');
-    return {};
-  }
+  return (
+    (await readJsonFile<AutoBookings>(autoBookingsPath(), dateTimeReviver)) ??
+    {}
+  );
 }
 
 export async function getAllAutoBookings(): Promise<AutoBookings> {

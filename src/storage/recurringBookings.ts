@@ -1,11 +1,9 @@
-import { promises } from 'fs';
 import path from 'path';
 import { v4 as uuid } from 'uuid';
 
 import { Course } from 'requests/golfBooking';
 import { getDataDir } from 'shared/env';
-
-const fs = promises;
+import { readJsonFile, writeJsonAtomic } from 'storage/jsonFile';
 
 function recurringBookingsPath(): string {
   return path.join(getDataDir(), 'recurringBookings.json');
@@ -34,31 +32,19 @@ const dateTimeReviver = (key: string, value: string) => {
 };
 
 async function save(recurringBookings: RecurringBookings): Promise<boolean> {
-  await fs.writeFile(
-    recurringBookingsPath(),
-    JSON.stringify(recurringBookings)
-  );
+  await writeJsonAtomic(recurringBookingsPath(), recurringBookings);
   return true;
 }
 
 let recurringBookingsCache: RecurringBookings | null = null;
 
 async function load(): Promise<RecurringBookings> {
-  try {
-    const file = await fs.readFile(recurringBookingsPath());
-    return JSON.parse(file.toString(), dateTimeReviver);
-  } catch (error: unknown) {
-    if (
-      error &&
-      typeof error === 'object' &&
-      'code' in error &&
-      error.code === 'ENOENT'
-    ) {
-      return {};
-    }
-    console.error('Loading recurring bookings failed');
-    return {};
-  }
+  return (
+    (await readJsonFile<RecurringBookings>(
+      recurringBookingsPath(),
+      dateTimeReviver
+    )) ?? {}
+  );
 }
 
 export async function getAllRecurringBookings(): Promise<RecurringBookings> {

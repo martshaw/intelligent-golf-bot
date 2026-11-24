@@ -1,9 +1,7 @@
-import { promises } from 'fs';
 import path from 'path';
 
 import { getDataDir } from 'shared/env';
-
-const fs = promises;
+import { readJsonFile, writeJsonAtomic } from 'storage/jsonFile';
 
 function loginsPath(): string {
   return path.join(getDataDir(), 'logins.json');
@@ -19,28 +17,14 @@ interface Logins {
 }
 
 async function save(logins: Logins): Promise<boolean> {
-  await fs.writeFile(loginsPath(), JSON.stringify(logins));
+  await writeJsonAtomic(loginsPath(), logins);
   return true;
 }
 
 let loginCache: Logins | null = null;
 
 async function load(): Promise<Logins> {
-  try {
-    const file = await fs.readFile(loginsPath(), 'utf-8');
-    return JSON.parse(file) as Logins;
-  } catch (error: unknown) {
-    if (
-      error &&
-      typeof error === 'object' &&
-      'code' in error &&
-      error.code === 'ENOENT'
-    ) {
-      return {};
-    }
-    console.error('Loading logins failed');
-    return {};
-  }
+  return (await readJsonFile<Logins>(loginsPath())) ?? {};
 }
 
 async function getLogins(): Promise<Logins> {
