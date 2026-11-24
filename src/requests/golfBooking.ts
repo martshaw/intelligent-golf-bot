@@ -472,6 +472,18 @@ export interface BookingResult {
 }
 
 /**
+ * Booking id from the club's redirect after a booking request, or null.
+ * Only `?edit=<id>&newbooking=1` counts as a new booking.
+ */
+export function bookingIdFromRedirect(
+  location: string | undefined
+): string | null {
+  if (!location || !/[?&]newbooking=1(?:&|$)/.test(location)) return null;
+  const m = /[?&]edit=(\d+)/.exec(location);
+  return m ? m[1] : null;
+}
+
+/**
  * Book a tee time slot.
  * Disables redirect following to capture the Location header which contains the
  * booking ID (e.g. `?edit=1895056&newbooking=1`).
@@ -510,49 +522,42 @@ export async function bookTimeSlot(
       `[bookTimeSlot] response status=${statusCode}, location=${locationHeader ?? '(none)'}`
     );
 
-    // Extract booking ID from redirect Location header
-    let bookingId: string | null = null;
-    if (locationHeader) {
-      const editMatch = /edit=(\d+)/.exec(locationHeader);
-      if (editMatch) {
-        bookingId = editMatch[1];
-        console.log(`[bookTimeSlot] extracted bookingId=${bookingId}`);
-      }
+    // A booking exists only when the club redirects to the new booking's
+    // edit page (?edit=<id>&newbooking=1). Nothing else counts.
+    const bookingId = bookingIdFromRedirect(locationHeader);
+    if (bookingId) {
+      console.log(`[bookTimeSlot] extracted bookingId=${bookingId}`);
+    } else if (locationHeader) {
+      console.warn(
+        `[bookTimeSlot] redirect is not a new booking (location=${locationHeader}); not booked`
+      );
     }
 
-    // If no redirect (e.g. booking failed, returned 200 with error), parse the body
+    // No new-booking redirect (e.g. 200 with an error page): not booked.
+    // Never take an id from the page body — it can list other bookings.
     if (!bookingId) {
       const bodyHtml =
         typeof bookingResponse.body === 'string' ? bookingResponse.body : '';
       if (bodyHtml) {
-        // Try to find edit link in the response body as fallback
-        const bodyMatch = /edit=(\d+)/.exec(bodyHtml);
-        if (bodyMatch) {
-          bookingId = bodyMatch[1];
-          console.log(
-            `[bookTimeSlot] extracted bookingId from body=${bookingId}`
-          );
-        } else {
-          // Log what the club said (page title + any error/notice text) so a
-          // failed attempt can be diagnosed. Truncated; no form data logged.
-          const $b = cheerio.load(bodyHtml);
-          const title = $b('title').text().replace(/\s+/g, ' ').trim();
-          const notice = $b(
-            '.error, .alert, .message, .notice, .warning, .errorbox, #errors'
+        // Log what the club said (page title + any error/notice text) so a
+        // failed attempt can be diagnosed. Truncated; no form data logged.
+        const $b = cheerio.load(bodyHtml);
+        const title = $b('title').text().replace(/\s+/g, ' ').trim();
+        const notice = $b(
+          '.error, .alert, .message, .notice, .warning, .errorbox, #errors'
+        )
+          .map((_i: number, el: unknown) =>
+            $b(el as Parameters<typeof $b>[0]).text()
           )
-            .map((_i: number, el: unknown) =>
-              $b(el as Parameters<typeof $b>[0]).text()
-            )
-            .get()
-            .join(' | ')
-            .replace(/\s+/g, ' ')
-            .trim()
-            .slice(0, 200);
-          console.error(
-            `[bookTimeSlot] no bookingId found — booking may have failed (title="${title.slice(0, 80)}", notice="${notice}", bodyLen=${bodyHtml.length})`
-          );
-          return null;
-        }
+          .get()
+          .join(' | ')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 200);
+        console.error(
+          `[bookTimeSlot] no new-booking redirect — not booked (status=${statusCode}, title="${title.slice(0, 80)}", notice="${notice}", bodyLen=${bodyHtml.length})`
+        );
+        return null;
       } else {
         console.error('[bookTimeSlot] empty response body and no redirect');
         return null;
