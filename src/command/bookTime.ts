@@ -4,11 +4,9 @@ import {
   bookTimeSlot,
   Course,
   getCourseAvailability,
-  addMemberPartner,
-  addGuestPartner,
-  resolvePartnerIdByName,
   BookingResult
 } from 'requests/golfBooking';
+import { clubPartyPort, fillParty } from 'booking/party';
 import { getSafeUserMessage, logError } from 'shared/errorHandling';
 import { getGolfClubName } from 'shared/env';
 import { getLogin } from 'storage/logins';
@@ -45,66 +43,21 @@ export function getMonitorBookCallbackData(date: Date, time: string): string {
 }
 
 /**
- * After booking, add partners from autoBookingConfig.json.
+ * After booking, add partners from autoBookingConfig.json straight away
+ * (same fast path as auto-booking: no delays, known ids first).
  * Returns array of result strings for display.
  */
 async function addPartnersFromConfig(
-  request: Parameters<typeof addMemberPartner>[0],
+  request: Parameters<typeof clubPartyPort>[0],
   bookingId: string
 ): Promise<string[]> {
   const config = await getAutoBookingConfig();
-  const golfers = config.golfers ?? [];
-  const partners = golfers.slice(1); // skip [0] = booker
-  const results: string[] = [];
-  let configUpdated = false;
-
-  for (let slot = 2; slot <= partners.length + 1; slot++) {
-    const golfer = partners[slot - 2];
-    if (!golfer) continue;
-
-    // Human-like delay
-    const delay = 3000 + Math.floor(Math.random() * 5000);
-    await new Promise((r) => setTimeout(r, delay));
-
-    const fullName = `${golfer.firstname} ${golfer.surname}`;
-    try {
-      if (golfer.type === 'guest') {
-        const ok = await addGuestPartner(request, {
-          bookingId,
-          slot,
-          firstname: golfer.firstname,
-          surname: golfer.surname
-        });
-        results.push(ok ? `✅ ${fullName} (guest)` : `❌ ${fullName} (guest failed)`);
-      } else {
-        let pid = golfer.partnerId ?? null;
-        if (!pid) {
-          pid = await resolvePartnerIdByName(request, {
-            bookingId,
-            firstname: golfer.firstname,
-            surname: golfer.surname
-          });
-          if (pid) {
-            golfer.partnerId = pid;
-            configUpdated = true;
-          }
-        }
-        if (pid) {
-          const ok = await addMemberPartner(request, { bookingId, partnerId: pid, slot });
-          results.push(ok ? `✅ ${fullName}` : `❌ ${fullName} (assign failed)`);
-        } else {
-          results.push(`❌ ${fullName} (not found)`);
-        }
-      }
-    } catch (err) {
-      results.push(`❌ ${fullName} (error)`);
-    }
-  }
-
-  if (configUpdated) {
+  const partners = (config.golfers ?? []).slice(1); // skip [0] = booker
+  const party = await fillParty(clubPartyPort(request), bookingId, partners);
+  if (party.learnedIds) {
     await saveAutoBookingConfig(config);
   }
-  return results;
+  return party.lines;
 }
 
 export function bookTimeCommand(bot: Bot): void {

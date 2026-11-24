@@ -18,9 +18,6 @@ import {
   login,
   verifyLoggedIn,
   NotLoggedInError,
-  addMemberPartner,
-  addGuestPartner,
-  resolvePartnerIdByName,
   BookingResult
 } from 'requests/golfBooking';
 import {
@@ -34,10 +31,8 @@ import { getLogin } from 'storage/logins';
 import { Bot } from 'grammy';
 import { escapeHtml, htmlToPlain } from 'shared/html';
 import { RequestAPI, RequiredUriUrl } from 'request';
-import {
-  GolferEntry,
-  saveAutoBookingConfig
-} from 'storage/autoBookingConfig';
+import { saveAutoBookingConfig } from 'storage/autoBookingConfig';
+import { clubPartyPort, fillParty } from 'booking/party';
 import {
   normalizeTime,
   timeToMinutes,
@@ -46,8 +41,7 @@ import {
 } from 'scheduled/windowSnipe';
 import {
   entryGolfers,
-  entryNumSlots,
-  partnerAddOrder
+  entryNumSlots
 } from 'scheduled/entryGolfers';
 
 let loginCache: {
@@ -134,89 +128,20 @@ async function completeAutoBooking(
   const bookingId = autoBooking.id.slice(0, 8);
   const { bookingId: clubBookingId, details: bookedSlot } = bookedResult;
 
-  // --- Partner Assignment ---
-  const partnerResults: string[] = [];
+  // --- Partner Assignment (immediately; partners can be claimed within seconds) ---
+  let partnerResults: string[] = [];
   const config = await getAutoBookingConfig();
   const players = entryGolfers(autoBooking, config.golfers);
   if (players) {
-    const { golfers } = players;
-    // Skip golfer[0] — that's the booker (already Player 1)
-    const partners = golfers.slice(1);
-    let configUpdated = false;
-
-    // No delay between adds: a partner can be claimed by another booking
-    // within seconds of the window opening. Known partner ids go first.
-    for (const { golfer, slot } of partnerAddOrder(partners)) {
-
-      const fullName = `${golfer.firstname} ${golfer.surname}`;
-      try {
-        if (golfer.type === 'guest') {
-          const success = await addGuestPartner(request, {
-            bookingId: clubBookingId,
-            slot,
-            firstname: golfer.firstname,
-            surname: golfer.surname
-          });
-          partnerResults.push(
-            success
-              ? `✅ ${fullName} (guest)`
-              : `❌ ${fullName} (guest failed)`
-          );
-        } else {
-          // Member — use cached partnerId or look it up
-          let pid = golfer.partnerId ?? null;
-          if (!pid) {
-            pid = await resolvePartnerIdByName(request, {
-              bookingId: clubBookingId,
-              firstname: golfer.firstname,
-              surname: golfer.surname
-            });
-            if (pid) {
-              // Cache the partnerId for next time
-              golfer.partnerId = pid;
-              configUpdated = true;
-              console.log(
-                `[AutoBook] cached partnerId=${pid} for ${fullName}`
-              );
-            }
-          }
-
-          if (pid) {
-            const success = await addMemberPartner(request, {
-              bookingId: clubBookingId,
-              partnerId: pid,
-              slot,
-              name: fullName
-            });
-            console.log(
-              `[AutoBook] ${bookingId} partner ${fullName} slot ${slot} ${success ? 'added' : 'FAILED'}`
-            );
-            partnerResults.push(
-              success
-                ? `✅ ${fullName}`
-                : `❌ ${fullName} (assign failed)`
-            );
-          } else {
-            partnerResults.push(
-              `❌ ${fullName} (member not found)`
-            );
-          }
-        }
-      } catch (partnerError) {
-        console.error(
-          `[AutoBook] partner error for ${fullName}:`,
-          partnerError instanceof Error
-            ? partnerError.message
-            : String(partnerError)
-        );
-        partnerResults.push(
-          `❌ ${fullName} (error)`
-        );
-      }
-    }
-
-    // Persist cached partner IDs (only for golfers that came from the config)
-    if (configUpdated && players.fromConfig) {
+    // golfers[0] is the booker (already Player 1)
+    const party = await fillParty(
+      clubPartyPort(request),
+      clubBookingId,
+      players.golfers.slice(1)
+    );
+    partnerResults = party.lines;
+    // Persist found partner IDs (only for golfers that came from the config)
+    if (party.learnedIds && players.fromConfig) {
       await saveAutoBookingConfig(config);
     }
   }
