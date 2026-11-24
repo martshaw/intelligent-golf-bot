@@ -657,9 +657,20 @@ export async function addMemberPartner(
   }
 }
 
+/** True when every word of `name` appears in the row text (case-insensitive). */
+function rowHasName(rowText: string, name: string): boolean {
+  const row = rowText.toLowerCase();
+  return name
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean)
+    .every((w) => row.includes(w));
+}
+
 /**
  * Read the booking edit page returned after an add-partner request.
- * Added = the requested slot is filled, or `name` appears in any player row.
+ * With `name`: added = that name appears in any player row (any word order).
+ * Without `name`: added = the requested slot is filled.
  * When not added, `reason` holds the page title, any notice text, and the
  * player rows (names only), so the failure can be diagnosed from the log.
  */
@@ -678,10 +689,17 @@ export function checkPartnerAdded(
     const nameCell = clean($row.find('td').eq(1).text());
     if (!slotCell && !nameCell) return;
     rows.push(`${slotCell}: ${nameCell.replace(/\(\s*Remove\s*\)/i, '').trim()}`);
-    if (slotCell === `Player ${slot}` && nameCell && !nameCell.includes('Enter Details')) {
+    if (name) {
+      // With a name, only that name counts: the club fills the next free row,
+      // so the requested row may hold a different partner.
+      if (rowHasName(nameCell, name)) added = true;
+    } else if (
+      slotCell === `Player ${slot}` &&
+      nameCell &&
+      !nameCell.includes('Enter Details')
+    ) {
       added = true;
     }
-    if (name && nameCell.toLowerCase().includes(name.toLowerCase())) added = true;
   });
   if (added) return { added, reason: '' };
   const title = clean($('title').text()).slice(0, 80);

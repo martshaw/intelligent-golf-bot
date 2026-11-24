@@ -49,6 +49,10 @@ const page = (rows: string[], extra = '') => `<html><head><title>Member's Teetim
 // Requested slot 3 but the club put George in Player 2: still counts as added.
 assert.strictEqual(checkPartnerAdded(page(['Martin Shaw (you)', 'George Thomson ( Remove )', 'Enter Details', 'Enter Details']), 3, 'George Thomson').added, true);
 assert.strictEqual(checkPartnerAdded(page(['Martin Shaw (you)', 'Brian Mckinlay (Remove)', 'Enter Details', 'Enter Details']), 2).added, true);
+// With a name, a different partner in the requested row is NOT a success.
+assert.strictEqual(checkPartnerAdded(page(['Martin Shaw (you)', 'George Thomson (Remove)', 'Enter Details', 'Enter Details']), 2, 'Brian Mckinlay').added, false);
+// Club may list surname first.
+assert.strictEqual(checkPartnerAdded(page(['Martin Shaw (you)', 'Mckinlay, Brian (Remove)', 'Enter Details']), 2, 'Brian Mckinlay').added, true);
 // Not added: reason carries title, notice and player rows.
 const fail = checkPartnerAdded(page(['Martin Shaw (you)', 'Enter Details', 'Enter Details', 'Enter Details'], '<div class="error">Brian Mckinlay is already booked at 10:16 on this day.</div>'), 2, 'Brian Mckinlay');
 assert.strictEqual(fail.added, false);
