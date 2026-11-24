@@ -110,6 +110,35 @@ export async function getBookings(
   return parsedBookings;
 }
 
+/**
+ * Dates of the member's upcoming bookings (e.g. "Sunday 29th November"),
+ * read from the home page's tee-times table in ONE request. Used for the
+ * same-day check in the booking loops, which do not need booking details.
+ * Returns [] when the session is not logged in.
+ */
+export async function getBookingDates(
+  request: RequestAPI<RequestPromise, RequestPromiseOptions, RequiredUriUrl>
+): Promise<Array<{ date: string }>> {
+  const html = await request(getGolfClubBaseUrl());
+  return parseBookingDates(String(html));
+}
+
+export function parseBookingDates(html: string): Array<{ date: string }> {
+  const $ = cheerio.load(html);
+  if (!$('title').text().includes('Welcome')) return [];
+  const rows = $('div#myteetimes tr');
+  const dates: Array<{ date: string }> = [];
+  rows.each((i: number, row: unknown) => {
+    if (i === rows.length - 1) return; // footer row, as in getBookings
+    const date = $(row as Parameters<ReturnType<typeof cheerio.load>>[0])
+      .find('td')
+      .eq(0)
+      .html(); // same cell read as getBookings, so hasBookingOnDay sees identical text
+    if (date) dates.push({ date });
+  });
+  return dates;
+}
+
 function parseBookingDetailsPage(html: string) {
   const $ = cheerio.load(html);
   const bookingDetails = $('div#teebooking_info tr');

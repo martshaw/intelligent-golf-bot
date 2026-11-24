@@ -13,7 +13,7 @@ import {
 } from 'storage/autoBookingConfig';
 import {
   bookTimeSlot,
-  getBookings,
+  getBookingDates,
   getCourseAvailability,
   login,
   verifyLoggedIn,
@@ -271,7 +271,7 @@ async function runWindowSnipe(
       const opensAt = getBookingOpensAt(startDate).getTime();
 
       try {
-        const existing = await getBookings(request);
+        const existing = await getBookingDates(request);
         if (hasBookingOnDay(existing, startDate)) {
           console.log(
             `[Snipe] ${shortId} already booked on ${startDate.toDateString()}, removing`
@@ -451,7 +451,7 @@ export function scheduledAutoBookingsMonitor(bot: Bot): void {
 
         // Already booked on this day? Stop polling and drop the request.
         try {
-          const existing = await getBookings(request);
+          const existing = await getBookingDates(request);
           if (hasBookingOnDay(existing, startDate)) {
             console.log(
               `[AutoBook] ${bookingId} already booked on ${startDate.toDateString()}, removing`

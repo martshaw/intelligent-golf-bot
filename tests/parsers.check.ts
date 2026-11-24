@@ -8,6 +8,7 @@ import {
   matchPartnerByName,
   bookingIdFromRedirect,
   bookTimeSlot,
+  parseBookingDates,
   Course
 } from '../src/requests/golfBooking';
 
@@ -77,6 +78,14 @@ const fakeRequest = (body: string): any => async () => body;
     { timeSlot: slot, numslots: 2 }
   );
   assert.strictEqual(ok?.bookingId, '2122132');
+
+  // Same-day check input: dates from the home page in one request, footer row skipped.
+  assert.deepStrictEqual(parseBookingDates(fixture('home-myteetimes.html')), [
+    { date: 'Saturday 28th November' },
+    { date: 'Sunday 29th November' }
+  ]);
+  // Logged-out page (no Welcome title) -> no dates.
+  assert.deepStrictEqual(parseBookingDates(fixture('booking-failed.html')), []);
 
   console.log('parsers.check: all assertions passed');
 })().catch((e) => {
