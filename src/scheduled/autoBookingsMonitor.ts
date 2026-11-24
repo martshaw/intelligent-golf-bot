@@ -32,6 +32,7 @@ import {
 } from 'shared/env';
 import { getLogin } from 'storage/logins';
 import { Bot } from 'grammy';
+import { escapeHtml, htmlToPlain } from 'shared/html';
 import { RequestAPI, RequiredUriUrl } from 'request';
 import {
   GolferEntry,
@@ -76,6 +77,9 @@ type ClubRequest = RequestAPI<
 >;
 type BookableSlot = Awaited<ReturnType<typeof getCourseAvailability>>[number];
 
+const sleep = (ms: number): Promise<void> =>
+  new Promise((r) => setTimeout(r, Math.max(0, ms)));
+
 /** Users whose pre-window snipe is running; the regular poll skips them. */
 const snipeActiveFor = new Set<number>();
 /** Entry ids that already had a snipe this process (one per entry). */
@@ -114,8 +118,9 @@ function hasBookingOnDay(
 }
 
 /**
- * After a confirmed booking id: add partners, send the Telegram confirmation,
- * and remove the auto-booking entry. Shared by the regular poll and the snipe.
+ * After a confirmed booking id: add partners, remove the auto-booking entry,
+ * then send the Telegram confirmation (a notify failure can't leave the entry
+ * behind or abort the caller). Shared by the regular poll and the snipe.
  */
 async function completeAutoBooking(
   bot: Bot,
@@ -216,6 +221,10 @@ async function completeAutoBooking(
     }
   }
 
+  // The booking exists: clear the entry before anything that can fail.
+  await deleteAutoBooking(autoBooking.id, userId);
+  console.log(`[AutoBook] ${bookingId} entry cleared`);
+
   // --- Telegram Notification ---
   let message = '<b>✅ Auto Booked!</b>\n';
   message += `<b>Date:</b> ${startDate.getDate()}/${startDate.getMonth() + 1}/${startDate.getFullYear()}\n`;
@@ -226,28 +235,50 @@ async function completeAutoBooking(
   if (partnerResults.length > 0) {
     message += `\n<b>Partners:</b>\n`;
     for (const pr of partnerResults) {
-      message += `  ${pr}\n`;
+      message += `  ${escapeHtml(pr)}\n`;
     }
   } else if (players) {
     const golfersList = players.golfers.length
       ? formatGolfersList(players.golfers)
       : null;
-    message += `<b>Participants:</b> ${golfersList ?? bookedSlot.participants.join(', ')}\n`;
+    message += `<b>Participants:</b> ${escapeHtml(golfersList ?? bookedSlot.participants.join(', '))}\n`;
   } else {
-    message += `<b>Participants:</b> ${bookedSlot.participants.join(', ')}\n`;
+    message += `<b>Participants:</b> ${escapeHtml(bookedSlot.participants.join(', '))}\n`;
   }
 
-  await bot.api.sendMessage(userId, message, {
-    parse_mode: 'HTML'
-  });
   console.log(
-    `[AutoBook] ${bookingId} SUCCESS — booked ${bookedTimeSlot.time}`
+    `[AutoBook] ${bookingId} SUCCESS — booked ${bookedTimeSlot.time} id=${clubBookingId}`
   );
-  await deleteAutoBooking(autoBooking.id, userId);
+  await notifyBooked(bot, userId, bookingId, message);
 }
 
-const sleep = (ms: number): Promise<void> =>
-  new Promise((r) => setTimeout(r, Math.max(0, ms)));
+/** Send the booking confirmation; on failure retry once as plain text. Never throws. */
+async function notifyBooked(
+  bot: Bot,
+  userId: number,
+  shortId: string,
+  message: string
+): Promise<void> {
+  try {
+    await bot.api.sendMessage(userId, message, { parse_mode: 'HTML' });
+    return;
+  } catch (error) {
+    console.error(
+      `[AutoBook] ${shortId} notify FAILED, retrying as plain text:`,
+      error instanceof Error ? error.message : String(error)
+    );
+  }
+  await sleep(5000);
+  try {
+    await bot.api.sendMessage(userId, htmlToPlain(message));
+  } catch (error) {
+    console.error(
+      `[AutoBook] ${shortId} notify FAILED again (booking still made):`,
+      error instanceof Error ? error.message : String(error)
+    );
+  }
+}
+
 
 /** Log in on a new cookie jar and confirm the member booking page loads. */
 async function freshVerifiedLogin(userId: number): Promise<ClubRequest | null> {
