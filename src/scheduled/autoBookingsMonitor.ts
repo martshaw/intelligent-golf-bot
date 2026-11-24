@@ -43,6 +43,11 @@ import {
   snipeWindow,
   filterAllowedTimes
 } from 'scheduled/windowSnipe';
+import {
+  entryGolfers,
+  entryNumSlots,
+  partnerAddOrder
+} from 'scheduled/entryGolfers';
 
 let loginCache: {
   [key: string]: RequestAPI<
@@ -126,21 +131,17 @@ async function completeAutoBooking(
 
   // --- Partner Assignment ---
   const partnerResults: string[] = [];
-  if (autoBooking.useConfigGolfers) {
-    const config = await getAutoBookingConfig();
-    const golfers = config.golfers ?? [];
+  const config = await getAutoBookingConfig();
+  const players = entryGolfers(autoBooking, config.golfers);
+  if (players) {
+    const { golfers } = players;
     // Skip golfer[0] — that's the booker (already Player 1)
     const partners = golfers.slice(1);
     let configUpdated = false;
 
-    for (let slot = 2; slot <= partners.length + 1; slot++) {
-      const golfer = partners[slot - 2];
-      if (!golfer) continue;
-
-      // Human-like delay between partner additions (3-8 seconds)
-      const delay =
-        3000 + Math.floor(Math.random() * 5000);
-      await new Promise((r) => setTimeout(r, delay));
+    // No delay between adds: a partner can be claimed by another booking
+    // within seconds of the window opening. Known partner ids go first.
+    for (const { golfer, slot } of partnerAddOrder(partners)) {
 
       const fullName = `${golfer.firstname} ${golfer.surname}`;
       try {
@@ -179,8 +180,12 @@ async function completeAutoBooking(
             const success = await addMemberPartner(request, {
               bookingId: clubBookingId,
               partnerId: pid,
-              slot
+              slot,
+              name: fullName
             });
+            console.log(
+              `[AutoBook] ${bookingId} partner ${fullName} slot ${slot} ${success ? 'added' : 'FAILED'}`
+            );
             partnerResults.push(
               success
                 ? `✅ ${fullName}`
@@ -205,8 +210,8 @@ async function completeAutoBooking(
       }
     }
 
-    // Persist cached partner IDs
-    if (configUpdated) {
+    // Persist cached partner IDs (only for golfers that came from the config)
+    if (configUpdated && players.fromConfig) {
       await saveAutoBookingConfig(config);
     }
   }
@@ -223,10 +228,9 @@ async function completeAutoBooking(
     for (const pr of partnerResults) {
       message += `  ${pr}\n`;
     }
-  } else if (autoBooking.useConfigGolfers) {
-    const config = await getAutoBookingConfig();
-    const golfersList = config.golfers?.length
-      ? formatGolfersList(config.golfers)
+  } else if (players) {
+    const golfersList = players.golfers.length
+      ? formatGolfersList(players.golfers)
       : null;
     message += `<b>Participants:</b> ${golfersList ?? bookedSlot.participants.join(', ')}\n`;
   } else {
@@ -342,7 +346,11 @@ async function runWindowSnipe(
               date: startDate,
               skipLanding: true
             }),
-          book: (slot) => bookTimeSlot(req, { timeSlot: slot }),
+          book: (slot) =>
+            bookTimeSlot(req, {
+              timeSlot: slot,
+              numslots: entryNumSlots(autoBooking)
+            }),
           now: () => Date.now(),
           sleep,
           log: (msg) => console.log(`[Snipe] ${shortId} ${msg}`)
@@ -479,7 +487,10 @@ export function scheduledAutoBookingsMonitor(bot: Bot): void {
           const msUntilOpen = bookingOpensAt.getTime() - now.getTime();
           const hoursUntilOpen = (msUntilOpen / 1000 / 60 / 60).toFixed(1);
           console.log(
-            `[AutoBook] ${bookingId} waiting — booking opens ${bookingOpensAt.toLocaleString('en-GB')} (${hoursUntilOpen}h)`
+            `[AutoBook] ${bookingId} waiting — booking opens ${bookingOpensAt.toLocaleString('en-GB')} (${hoursUntilOpen}h)` +
+              (autoBooking.golfers?.length
+                ? ` — ${autoBooking.golfers.length} places: ${formatGolfersList(autoBooking.golfers)}`
+                : '')
           );
           continue;
         }
@@ -583,7 +594,10 @@ export function scheduledAutoBookingsMonitor(bot: Bot): void {
               `[AutoBook] ${bookingId} attempting ${timeSlot.time}...`
             );
             try {
-              bookedResult = await bookTimeSlot(request, { timeSlot });
+              bookedResult = await bookTimeSlot(request, {
+                timeSlot,
+                numslots: entryNumSlots(autoBooking)
+              });
               if (bookedResult) {
                 bookedTimeSlot = timeSlot;
                 break;

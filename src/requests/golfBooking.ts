@@ -625,6 +625,8 @@ export async function addMemberPartner(
     bookingId: string;
     partnerId: number;
     slot: number;
+    /** Partner's name; counts as added if it shows in any player row (the club may compact slots). */
+    name?: string;
   }
 ): Promise<boolean> {
   const baseUrl = getGolfClubBaseUrl();
@@ -634,22 +636,13 @@ export async function addMemberPartner(
 
   try {
     const html: string = await request(url, { method: 'GET' });
-    const $ = cheerio.load(html);
-    // Check that the player slot now shows a name instead of "Enter Details"
-    const players = $('div#teebooking_players tr');
-    let filled = false;
-    players.each((_i: number, row: unknown) => {
-      const $row = $(row as Parameters<ReturnType<typeof cheerio.load>>[0]);
-      const slotCell = $row.find('td').eq(0).text().trim();
-      const nameCell = $row.find('td').eq(1).text().trim();
-      if (
-        slotCell === `Player ${args.slot}` &&
-        !nameCell.includes('Enter Details')
-      ) {
-        filled = true;
-      }
-    });
-    return filled;
+    const result = checkPartnerAdded(html, args.slot, args.name);
+    if (!result.added) {
+      console.warn(
+        `[addMemberPartner] slot ${args.slot}${args.name ? ` (${args.name})` : ''} not added — ${result.reason}`
+      );
+    }
+    return result.added;
   } catch (error) {
     console.error(
       `[addMemberPartner] error for slot ${args.slot}:`,
@@ -657,6 +650,48 @@ export async function addMemberPartner(
     );
     return false;
   }
+}
+
+/**
+ * Read the booking edit page returned after an add-partner request.
+ * Added = the requested slot is filled, or `name` appears in any player row.
+ * When not added, `reason` holds the page title, any notice text, and the
+ * player rows (names only), so the failure can be diagnosed from the log.
+ */
+export function checkPartnerAdded(
+  html: string,
+  slot: number,
+  name?: string
+): { added: boolean; reason: string } {
+  const $ = cheerio.load(html);
+  const clean = (t: string) => t.replace(/\s+/g, ' ').trim();
+  const rows: string[] = [];
+  let added = false;
+  $('div#teebooking_players tr').each((_i: number, row: unknown) => {
+    const $row = $(row as Parameters<ReturnType<typeof cheerio.load>>[0]);
+    const slotCell = clean($row.find('td').eq(0).text());
+    const nameCell = clean($row.find('td').eq(1).text());
+    if (!slotCell && !nameCell) return;
+    rows.push(`${slotCell}: ${nameCell.replace(/\(\s*Remove\s*\)/i, '').trim()}`);
+    if (slotCell === `Player ${slot}` && nameCell && !nameCell.includes('Enter Details')) {
+      added = true;
+    }
+    if (name && nameCell.toLowerCase().includes(name.toLowerCase())) added = true;
+  });
+  if (added) return { added, reason: '' };
+  const title = clean($('title').text()).slice(0, 80);
+  const notice = clean(
+    $('.error, .alert, .message, .notice, .warning, .errorbox, #errors, .ui-state-error, .ui-state-highlight')
+      .map((_i: number, el: unknown) => $(el as Parameters<typeof $>[0]).text())
+      .get()
+      .join(' | ')
+  ).slice(0, 200);
+  const bodyText = clean($('body').text());
+  const hint = /[^.]{0,80}(already|not available|unable|cannot|can't|clash)[^.]{0,80}/i.exec(bodyText);
+  return {
+    added,
+    reason: `title="${title}", notice="${notice}"${hint ? `, text="${clean(hint[0]).slice(0, 160)}"` : ''}, players=[${rows.join('; ')}]`
+  };
 }
 
 /**
@@ -713,6 +748,32 @@ export async function addGuestPartner(
 }
 
 /**
+ * Pick a member from partner-search results. Order: full name; then same
+ * first name with the surname's first 4 letters (spelling variants such as
+ * Thomson/Thompson); then surname only.
+ */
+export function matchPartnerByName(
+  results: Array<{ name: string; partnerId: number }>,
+  firstname: string,
+  surname: string
+): { name: string; partnerId: number; how: 'full' | 'first+prefix' | 'surname' } | null {
+  const first = firstname.trim().toLowerCase();
+  const sur = surname.trim().toLowerCase();
+  const full = `${first} ${sur}`;
+  const lower = results.map((r) => ({ r, n: r.name.toLowerCase() }));
+  const byFull = lower.find(({ n }) => n.includes(full));
+  if (byFull) return { ...byFull.r, how: 'full' };
+  const prefix = sur.slice(0, 4);
+  const byFirst = lower.find(
+    ({ n }) => n.startsWith(`${first} `) && n.slice(first.length + 1).startsWith(prefix)
+  );
+  if (byFirst) return { ...byFirst.r, how: 'first+prefix' };
+  const bySur = lower.find(({ n }) => n.includes(sur));
+  if (bySur) return { ...bySur.r, how: 'surname' };
+  return null;
+}
+
+/**
  * Look up a golfer's partner ID by searching the club member list.
  * Searches by first 3 chars of surname, then matches the full name.
  * Returns the partnerId or null if not found.
@@ -730,27 +791,18 @@ export async function resolvePartnerIdByName(
     surnamePrefix: args.surname.substring(0, 3)
   });
 
-  const fullName = `${args.firstname} ${args.surname}`.toLowerCase();
-  for (const r of results) {
-    // Match: "Brian Shaw (16.0)" contains "Brian Shaw"
-    if (r.name.toLowerCase().includes(fullName)) {
-      return r.partnerId;
-    }
-  }
-
-  // Fallback: match surname only (in case of first-name variations)
-  const surnameOnly = args.surname.toLowerCase();
-  for (const r of results) {
-    if (r.name.toLowerCase().includes(surnameOnly)) {
+  const match = matchPartnerByName(results, args.firstname, args.surname);
+  if (match) {
+    if (match.how !== 'full') {
       console.log(
-        `[resolvePartnerIdByName] partial match: "${r.name}" for "${fullName}" — using partnerId=${r.partnerId}`
+        `[resolvePartnerIdByName] ${match.how} match: "${match.name}" for "${args.firstname} ${args.surname}" — using partnerId=${match.partnerId}`
       );
-      return r.partnerId;
     }
+    return match.partnerId;
   }
 
   console.warn(
-    `[resolvePartnerIdByName] no match for "${fullName}" in ${results.length} results`
+    `[resolvePartnerIdByName] no match for "${args.firstname} ${args.surname}" in ${results.length} results`
   );
   return null;
 }

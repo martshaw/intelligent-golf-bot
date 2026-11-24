@@ -4,6 +4,7 @@ import { v4 as uuid } from 'uuid';
 
 import { Course } from 'requests/golfBooking';
 import { getDataDir } from 'shared/env';
+import type { GolferEntry } from 'storage/autoBookingConfig';
 
 const fs = promises;
 
@@ -22,6 +23,11 @@ export interface AutoBooking {
   preferredTime?: string;
   /** If set, only these HH:MM times may be booked (must also be inside the window). */
   allowedTimes?: string[];
+  /**
+   * Players for this entry only (booker first). Overrides the config golfers
+   * and books golfers.length places instead of BOOKING_NUM_SLOTS.
+   */
+  golfers?: GolferEntry[];
 }
 
 export interface AutoBookings {
