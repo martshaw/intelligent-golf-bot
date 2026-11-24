@@ -18,10 +18,12 @@
     "debug:availability": "yarn build && RUN_AVAILABILITY_DEBUG=1 DEBUG_AVAILABILITY_RAW=1 node -r dotenv/config dist/bundle.js",
     "debug:availability:tomorrow": "yarn build && RUN_AVAILABILITY_DEBUG=1 DEBUG_AVAILABILITY_DATE=tomorrow node -r dotenv/config dist/bundle.js",
     "start:dev": "nodemon -r dotenv/config --config nodemon.json",
-    "test": "yarn test:unit",
+    "test": "yarn typecheck && yarn test:checks",
     "test:unit": "jest src",
     "test:unit:coverage": "jest src --collectCoverage",
-    "lint-staged": "lint-staged"
+    "lint-staged": "lint-staged",
+    "typecheck": "tsc --noEmit -p .",
+    "test:checks": "node scripts/run-checks.js"
   },
   "keywords": [],
   "author": "Zack Pollard (https://github.com/zp-bots-telegram)",
