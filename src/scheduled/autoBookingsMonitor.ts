@@ -21,7 +21,6 @@ import {
   BookingResult
 } from 'requests/golfBooking';
 import {
-  getAutoBookingRandomSlot,
   getDaysAheadToBook,
   getBookingOpensHour,
   getBookingOpensMinute,
@@ -35,9 +34,8 @@ import { saveAutoBookingConfig } from 'storage/autoBookingConfig';
 import { clubPartyPort, fillParty } from 'booking/party';
 import {
   normalizeTime,
-  timeToMinutes,
   snipeWindow,
-  filterAllowedTimes
+  chooseTeeTimes
 } from 'scheduled/windowSnipe';
 import {
   entryGolfers,
@@ -494,13 +492,13 @@ export function scheduledAutoBookingsMonitor(bot: Bot): void {
             `${endDate.getHours()}:${endDate.getMinutes()}`
           );
 
-          availability = filterAllowedTimes(
-            availability.filter((el) => {
-              const t = normalizeTime(el.time);
-              return el.canBook && t >= startTime && t <= endTime;
-            }),
-            autoBooking.allowedTimes
-          );
+          // Same rule as the snipe: window, allowed times, preferred first.
+          availability = chooseTeeTimes(availability, {
+            windowStart: startTime,
+            windowEnd: endTime,
+            allowedTimes: autoBooking.allowedTimes,
+            preferredTime: autoBooking.preferredTime
+          });
 
           if (availability.length === 0) {
             const range = autoBooking.allowedTimes?.length
@@ -513,30 +511,8 @@ export function scheduledAutoBookingsMonitor(bot: Bot): void {
           }
 
           console.log(
-            `[AutoBook] ${bookingId} ${availability.length} slots in window: ${availability.map((s) => s.time).join(', ')}`
+            `[AutoBook] ${bookingId} ${availability.length} slots in window${autoBooking.preferredTime ? ` (preferred ${normalizeTime(autoBooking.preferredTime)})` : ''}, in order: ${availability.map((s) => s.time).join(', ')}`
           );
-
-          // Sort by proximity to preferred time (if set), otherwise earliest first
-          if (autoBooking.preferredTime) {
-            const pref = normalizeTime(autoBooking.preferredTime);
-            availability.sort((a, b) => {
-              const aN = normalizeTime(a.time);
-              const bN = normalizeTime(b.time);
-              const aDiff = Math.abs(timeToMinutes(aN) - timeToMinutes(pref));
-              const bDiff = Math.abs(timeToMinutes(bN) - timeToMinutes(pref));
-              return aDiff - bDiff;
-            });
-            console.log(
-              `[AutoBook] ${bookingId} preferred=${pref}, sorted: ${availability.map((s) => s.time).join(', ')}`
-            );
-          } else if (getAutoBookingRandomSlot() && availability.length > 1) {
-            // Random from top 3 (stealth mode) — only if no preferred time
-            const pick = Math.floor(
-              Math.random() * Math.min(3, availability.length)
-            );
-            const [chosen] = availability.splice(pick, 1);
-            availability.unshift(chosen);
-          }
 
           let bookedResult: BookingResult | null = null;
           let bookedTimeSlot = null;

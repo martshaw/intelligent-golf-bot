@@ -94,6 +94,29 @@ export function filterAllowedTimes<S extends SnipeSlot>(
   return slots.filter((s) => allowed.has(normalizeTime(s.time)));
 }
 
+/**
+ * The one tee-time rule, used by the snipe and the regular poll: bookable
+ * slots inside the window (inclusive), limited to allowedTimes when set,
+ * closest to the preferred time first (ties keep the earlier time).
+ */
+export function chooseTeeTimes<S extends SnipeSlot>(
+  slots: S[],
+  rule: {
+    windowStart: string;
+    windowEnd: string;
+    allowedTimes?: string[];
+    preferredTime?: string;
+  }
+): S[] {
+  return sortByPreference(
+    filterAllowedTimes(
+      slotsInWindow(slots, rule.windowStart, rule.windowEnd),
+      rule.allowedTimes
+    ),
+    rule.preferredTime
+  );
+}
+
 export async function snipeWindow<S extends SnipeSlot, R>(
   deps: SnipeDeps<S, R>,
   opts: SnipeOptions
@@ -124,13 +147,12 @@ export async function snipeWindow<S extends SnipeSlot, R>(
       continue;
     }
 
-    const inWindow = sortByPreference(
-      filterAllowedTimes(
-        slotsInWindow(slots, opts.windowStart, opts.windowEnd),
-        opts.allowedTimes
-      ),
-      pref
-    );
+    const inWindow = chooseTeeTimes(slots, {
+      windowStart: opts.windowStart,
+      windowEnd: opts.windowEnd,
+      allowedTimes: opts.allowedTimes,
+      preferredTime: pref
+    });
 
     if (inWindow.length === 0) {
       if (slots.some((s) => s.canBook)) {

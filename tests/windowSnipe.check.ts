@@ -1,6 +1,6 @@
 /* Offline check of the window snipe decision loop (no network). */
 import assert from 'assert';
-import { snipeWindow, SnipeSlot } from '../src/scheduled/windowSnipe';
+import { snipeWindow, SnipeSlot, chooseTeeTimes } from '../src/scheduled/windowSnipe';
 
 type Slot = SnipeSlot & { id: string };
 const mk = (times: string[], bookable: string[]): Slot[] =>
@@ -56,5 +56,14 @@ async function run(name: string, sheets: Slot[][], bookOk: (t: string, n: number
   assert.deepStrictEqual(r.tries, ['10:24', '10:24', '10:24', '10:24', '10:40']);
   assert.strictEqual(r.res?.slot.time, '10:40');
   assert.ok(!r.tries.includes('10:32') && !r.tries.includes('10:16'));
+  // 10. One tee-time rule (shared by snipe and poll): window, allowed times, preferred first.
+  const sheet = mk(ALL, ['10:08', '10:16', '10:24', '10:32', '10:40', '15:12']);
+  const pick = (o: Parameters<typeof chooseTeeTimes>[1]) => chooseTeeTimes(sheet, o).map((s) => s.time);
+  assert.deepStrictEqual(pick({ windowStart: '10:16', windowEnd: '10:40' }), ['10:16', '10:24', '10:32', '10:40']);
+  assert.deepStrictEqual(pick({ windowStart: '10:16', windowEnd: '10:40', preferredTime: '10:32' }), ['10:32', '10:24', '10:40', '10:16']);
+  assert.deepStrictEqual(pick({ windowStart: '10:16', windowEnd: '10:40', preferredTime: '10:24', allowedTimes: ['10:24', '10:40', '15:12'] }), ['10:24', '10:40']);
+  assert.deepStrictEqual(pick({ windowStart: '08:24', windowEnd: '08:40' }), []);
+  // Unbookable rows never chosen.
+  assert.deepStrictEqual(chooseTeeTimes(mk(ALL, ['10:40']), { windowStart: '10:16', windowEnd: '10:40', preferredTime: '10:24' }).map((s) => s.time), ['10:40']);
   console.log('ALL CHECKS PASSED');
 })().catch((e) => { console.error(e); process.exit(1); });

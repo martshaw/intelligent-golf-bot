@@ -47,10 +47,6 @@ export const getMonitorIntervalSeconds = (): number => {
   return Number.isNaN(n) || n < 60 ? 300 : Math.min(n, 900);
 };
 
-/** If true, auto-booking picks a random slot in range (IGBookerBot-style). Default: false (earliest). */
-export const getAutoBookingRandomSlot = (): boolean =>
-  process.env.AUTO_BOOKING_RANDOM_SLOT === 'true' ||
-  process.env.AUTO_BOOKING_RANDOM_SLOT === '1';
 
 /** Hour of day when bookings open (0–23). Used for reference; default 18. */
 export const getBookingOpensHour = (): number => {
